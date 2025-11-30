@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/plugins/seisplotpy" >
+        <file>icon.png</file>
+    </qresource>
+</RCC>
