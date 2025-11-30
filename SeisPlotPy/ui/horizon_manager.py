@@ -1,3 +1,4 @@
+import os
 from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QTableWidget, QTableWidgetItem, QHeaderView, 
                              QFileDialog, QColorDialog, QCheckBox, QWidget, QMessageBox,

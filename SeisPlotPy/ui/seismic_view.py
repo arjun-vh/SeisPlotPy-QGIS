@@ -10,7 +10,7 @@ import matplotlib.cm as cm
 class SeismicView(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("SeisPlotPy v2")
+        self.setWindowTitle("SeisPlotPy")
         self.resize(1200, 800)
         main_widget = QWidget(); self.setCentralWidget(main_widget)
         self.layout = QHBoxLayout(main_widget); self.layout.setContentsMargins(0, 0, 0, 0)

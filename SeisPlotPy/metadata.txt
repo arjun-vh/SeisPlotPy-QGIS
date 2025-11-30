@@ -1,7 +1,6 @@
 [general]
 name=SeisPlotPy
-qgisMinimumVersion=3.22
-qgisMaximumVersion=3.99
+qgisMinimumVersion=3.16
 
 description=2D SEG-Y (post stack) data visualization, analysis, and horizon picking inside QGIS.
 about=SeisPlotPy is a modern seismic viewer and interpretation tool integrated directly into QGIS. It loads SEG-Y data using segyio, displays seismic profiles with pyqtgraph, links navigation to the QGIS map canvas, and provides tools for horizon picking, attribute computation, and export for further analysis.
