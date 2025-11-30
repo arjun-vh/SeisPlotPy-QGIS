@@ -1,7 +1,7 @@
 # SeisPlotPy (QGIS Plugin)
 
 **SeisPlotPy** is a acoustic subsurface data visualization and interpretation plugin for **QGIS**.  
-It allows users to load, view, navigate, and interpret **SEG-Y (post-stack) seismic data** directly inside QGIS.
+It allows users to load, view, navigate, analyse and interpret **SEG-Y (post-stack) seismic data** directly inside QGIS.
 
 SeisPlotPy is designed for earth scientists, researchers, students, and geophysics workflows involving seismic reflection or sub-bottom profiler data.
 
