@@ -34,7 +34,7 @@ Tip: Users may also install these using the **QGIS Pip Manager** plugin.
 
 ### 2️⃣ Install SeisPlotPy Plugin
 
-#### Option A — From ZIP (recommended for testing)
+#### Option A — From ZIP 
 
 1. Download the latest release ZIP from the repository:
     https://github.com/arjun-vh/SeisPlotPy-QGIS/releases
