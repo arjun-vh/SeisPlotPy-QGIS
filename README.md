@@ -103,10 +103,6 @@ Please report it here:
 https://github.com/arjun-vh/SeisPlotPy-QGIS/issues
 
 
----
 
-> If this plugin helps your work or research, consider starring the repository!
-
----
 
 
