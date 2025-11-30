@@ -89,7 +89,7 @@ The plugin will notify users if any dependencies are missing.
 
 ---
 
-## 🧾 License
+## License
 
 SeisPlotPy is released under the **GPL-2.0 license**.
 
