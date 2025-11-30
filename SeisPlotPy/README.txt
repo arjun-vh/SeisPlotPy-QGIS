@@ -1,9 +1,9 @@
 Plugin Builder Results
 
-Your plugin SeisPlotPy was created in:
+The plugin SeisPlotPy was created in:
     C:/Users/Admin/AppData/Roaming/QGIS/QGIS3/profiles/default/python/plugins\seisplotpy
 
-Your QGIS plugin directory is located at:
+The QGIS plugin directory is located at:
     C:/Users/Admin/AppData/Roaming/QGIS/QGIS3/profiles/default/python/plugins
 
 What's Next:
