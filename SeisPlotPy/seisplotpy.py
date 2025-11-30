@@ -23,22 +23,13 @@
 """
 # -*- coding: utf-8 -*-
 
-import sys
-import os
-
-# --- Add Plugin Directory to Path ---
-plugin_dir = os.path.dirname(os.path.abspath(__file__))
-if plugin_dir not in sys.path:
-    sys.path.insert(0, plugin_dir)
-# --------------------------------------------------
-
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction
 from .resources import *
 
-# Import our custom tool
-from core.map_tool import SeismicNavigationTool
+# Import the custom tool
+from .core.map_tool import SeismicNavigationTool
 
 class SeisPlotPy:
     """QGIS Plugin Implementation."""
@@ -128,7 +119,7 @@ class SeisPlotPy:
 
     def run(self):
         """Launch a new Controller (Window)"""
-        from controller import MainController
+        from .controller import MainController
         new_controller = MainController(self.iface)
         self.controllers.append(new_controller)
 

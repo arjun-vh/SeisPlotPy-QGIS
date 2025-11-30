@@ -1,106 +1,62 @@
-import sys
-import subprocess
-import os
+import importlib
 from qgis.PyQt.QtWidgets import QMessageBox
 
-def get_python_interpreter():
-    """
-    Finds the real python executable.
-    In QGIS on Windows, sys.executable points to qgis-bin.exe, which cannot run pip.
-    """
-    executable = sys.executable
-    
-    # If it looks like python, return it
-    if os.path.basename(executable).lower().startswith('python'):
-        return executable
-        
-    # If not (e.g. qgis.exe), find python in the prefix
-    # Windows: python.exe is usually in sys.exec_prefix
-    if os.name == 'nt':
-        candidate = os.path.join(sys.exec_prefix, 'python.exe')
-        if os.path.exists(candidate):
-            return candidate
-            
-    # Linux/Mac: python3 is usually in sys.exec_prefix/bin
-    candidate = os.path.join(sys.exec_prefix, 'bin', 'python3')
-    if os.path.exists(candidate):
-        return candidate
-        
-    # Fallback (this might fail if not in path)
-    return 'python'
+# Map import names to the package names users should install
+REQUIRED_MODULES = {
+    "segyio": "segyio",
+    "numpy": "numpy",
+    "scipy": "scipy",
+    "pandas": "pandas",
+    "pyqtgraph": "pyqtgraph",
+    "matplotlib": "matplotlib",
+}
 
-def install_dependencies(iface):
+
+def check_dependencies(iface):
     """
-    Checks for required packages and installs them using pip if missing.
+    Check that all required Python packages are importable.
+
+    Returns:
+        True  -> all good, plugin can load
+        False -> something missing, message shown to user, plugin should not load
     """
-    required = {
-        'segyio': 'segyio',
-        'pandas': 'pandas',
-        'scipy': 'scipy',
-        'matplotlib': 'matplotlib',
-        'pyqtgraph': 'pyqtgraph',
-        'numpy': 'numpy'
-    }
-    
     missing = []
-    
-    for import_name, package_name in required.items():
+
+    for import_name, package_name in REQUIRED_MODULES.items():
         try:
-            __import__(import_name)
+            importlib.import_module(import_name)
         except ImportError:
             missing.append(package_name)
-            
+
     if not missing:
         return True
 
-    msg = (
-        "The 'SeisPlotPy' plugin requires the following missing Python libraries:\n\n"
-        f"{', '.join(missing)}\n\n"
-        "Do you want to download and install them now?\n"
-        "(This will use the standard Python installer 'pip')"
-    )
-    
-    reply = QMessageBox.question(
-        iface.mainWindow(), 
-        "Missing Dependencies", 
-        msg, 
-        QMessageBox.Yes | QMessageBox.No, 
-        QMessageBox.Yes
-    )
-    
-    if reply == QMessageBox.No:
-        return False
+    # Build a clear, user-friendly message
+    missing_str = ", ".join(missing)
 
-    python_exec = get_python_interpreter()
-    
-    # Command: python.exe -m pip install --user package_name
-    cmd = [python_exec, '-m', 'pip', 'install', '--user'] + missing
-    
-    try:
-        iface.messageBar().pushMessage("Installing libraries...", "Please wait...", level=0, duration=0)
-        
-        # This prevents the black command window from popping up on Windows
-        startupinfo = None
-        if os.name == 'nt':
-            startupinfo = subprocess.STARTUPINFO()
-            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        
-        subprocess.check_call(cmd, startupinfo=startupinfo)
-        
-        QMessageBox.information(
-            iface.mainWindow(), 
-            "Success", 
-            "Libraries installed successfully!\n\nPlease RESTART QGIS to activate the plugin."
-        )
-        return False
-        
-    except subprocess.CalledProcessError as e:
-        QMessageBox.critical(
-            iface.mainWindow(), 
-            "Installation Failed", 
-            f"Could not install libraries automatically.\n\nError Code: {e.returncode}\nCommand: {' '.join(cmd)}\n\nPlease install manually."
-        )
-        return False
-    except Exception as e:
-        QMessageBox.critical(iface.mainWindow(), "Error", f"Unexpected error: {str(e)}")
-        return False
+    msg = (
+        "The 'SeisPlotPy' plugin requires the following Python packages in the "
+        "QGIS Python environment:\n\n"
+        f"    {missing_str}\n\n"
+        "They are currently NOT available.\n\n"
+        "▶ On Windows (QGIS / OSGeo4W):\n"
+        "  1. Close QGIS completely.\n"
+        "  2. Open the 'OSGeo4W Shell' from the Start Menu.\n"
+        "  3. Run the command (all on one line):\n"
+        f"     python -m pip install {missing_str}\n\n"
+        "▶ On Linux / macOS:\n"
+        "  Install them into the Python environment that QGIS uses, for example:\n"
+        f"     python3 -m pip install {missing_str}\n\n"
+        "▶ Alternative (any OS):\n"
+        "  You may also use the 'QGIS Pip Manager' plugin to install these\n"
+        "  packages inside the QGIS environment.\n\n"
+        "After installation, restart QGIS and enable SeisPlotPy again."
+    )
+
+    QMessageBox.critical(
+        iface.mainWindow(),
+        "SeisPlotPy - Missing Python Dependencies",
+        msg,
+    )
+
+    return False

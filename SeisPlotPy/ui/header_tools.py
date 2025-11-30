@@ -1,8 +1,8 @@
-from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, 
+from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, 
                              QListWidget, QListWidgetItem, QCheckBox, QDialogButtonBox, 
                              QLabel, QTextEdit, QComboBox)
 import pyqtgraph as pg
-from PyQt5.QtCore import Qt
+from qgis.PyQt.QtCore import Qt
 import numpy as np
 
 class TextHeaderDialog(QDialog):

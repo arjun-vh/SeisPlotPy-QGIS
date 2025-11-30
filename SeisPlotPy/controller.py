@@ -1,12 +1,3 @@
-import sys
-import os
-
-
-plugin_dir = os.path.dirname(os.path.abspath(__file__))
-if plugin_dir not in sys.path:
-    sys.path.insert(0, plugin_dir)
-
-
 from qgis.PyQt.QtWidgets import (QApplication, QFileDialog, QMessageBox, QInputDialog, 
                              QMenuBar, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QDoubleSpinBox, QDialog, QDialogButtonBox, 
@@ -29,12 +20,12 @@ from scipy.spatial import cKDTree
 import pyqtgraph as pg
 
 # Internal Imports
-from ui.seismic_view import SeismicView
-from ui.header_tools import TextHeaderDialog, HeaderQCPlot, SpectrumPlot, HeaderExportDialog
-from ui.horizon_manager import HorizonManager
-from ui.dialogs import GeometryDialog, BandpassDialog
-from core.data_handler import SeismicDataManager
-from core.processing import SeismicProcessing
+from .ui.seismic_view import SeismicView
+from .ui.header_tools import TextHeaderDialog, HeaderQCPlot, SpectrumPlot, HeaderExportDialog
+from .ui.horizon_manager import HorizonManager
+from .ui.dialogs import GeometryDialog, BandpassDialog
+from .core.data_handler import SeismicDataManager
+from .core.processing import SeismicProcessing
 
 import numpy as np
 import pandas as pd

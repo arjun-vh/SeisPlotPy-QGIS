@@ -1,47 +1,25 @@
-# This file contains metadata for your plugin.
-
-# This file should be included when you package your plugin.# Mandatory items:
-
 [general]
 name=SeisPlotPy
-qgisMinimumVersion=3.0
-description=SEG-Y Visualization and Navigation
-version=0.1
+qgisMinimumVersion=3.22
+qgisMaximumVersion=3.99
+
+description=2D SEG-Y (post stack) data visualization, analysis, and horizon picking inside QGIS.
+about=SeisPlotPy is a modern seismic viewer and interpretation tool integrated directly into QGIS. It loads SEG-Y data using segyio, displays seismic profiles with pyqtgraph, links navigation to the QGIS map canvas, and provides tools for horizon picking, attribute computation, and export for further analysis.
+
+version=0.9.0
+
 author=Arjun V H
 email=arjunvelliyidathu@gmail.com
 
-about=A modern, high-performance Python workstation for Seismic Visualization, Interpretation, and Quality Control.
+# Update these URLs after you create the GitHub repo:
+homepage=https://github.com/arjun-vh/SeisPlotPy-QGIS
+repository=https://github.com/arjun-vh/SeisPlotPy-QGIS
+tracker=https://github.com/arjun-vh/SeisPlotPy-QGIS/issues
 
-tracker=http://bugs
-repository=http://repo
-# End of mandatory metadata
-
-# Recommended items:
-
-hasProcessingProvider=no
-# Uncomment the following line and add your changelog:
-# changelog=
-
-# Tags are comma separated with spaces allowed
-tags=python
-
-homepage=http://homepage
-category=Plugins
+# How it appears in the plugin manager:
+category=Raster
 icon=icon.png
-# experimental flag
-experimental=False
+tags=seismic,segy,geophysics,subsurface,sub-bottom profiler,reflection
 
-# deprecated flag (applies to the whole plugin, not just a single version)
+experimental=True
 deprecated=False
-
-# Since QGIS 3.8, a comma separated list of plugins to be installed
-# (or upgraded) can be specified.
-# Check the documentation for more information.
-# plugin_dependencies=
-
-Category of the plugin: Raster, Vector, Database or Web
-# category=
-
-# If the plugin can run on QGIS Server.
-server=False
-

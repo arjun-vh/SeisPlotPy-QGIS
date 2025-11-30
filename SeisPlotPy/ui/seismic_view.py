@@ -1,7 +1,7 @@
-from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+from qgis.PyQt.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
                              QPushButton, QLabel, QFrame, QSplitter, 
                              QComboBox, QDoubleSpinBox, QCheckBox, QGroupBox)
-from PyQt5.QtCore import Qt, QRectF
+from qgis.PyQt.QtCore import Qt, QRectF
 import pyqtgraph as pg
 import numpy as np
 import matplotlib.pyplot as plt

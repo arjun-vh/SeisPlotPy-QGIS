@@ -24,24 +24,27 @@
 """
 
 # -*- coding: utf-8 -*-
-def classFactory(iface):  # pylint: disable=invalid-name
+def classFactory(iface):
     """
-    Load SeisPlotPy class. 
-    Checks dependencies first.
+    Load SeisPlotPy class, but only if dependencies are available.
     """
-    # 1. Import dependency checker
-    from .dependencies import install_dependencies
-    
-    # 2. Run the check
-    # If it returns False (installed just now, or user said No), do not load the plugin
-    if not install_dependencies(iface):
-        # Return a dummy class to prevent QGIS error, but plugin won't work yet
+    from .dependencies import check_dependencies
+
+    # 1. Check dependencies
+    if not check_dependencies(iface):
+        # Return a dummy plugin so QGIS doesn't error, but it will do nothing.
         class DummyPlugin:
-            def __init__(self, iface): pass
-            def initGui(self): pass
-            def unload(self): pass
+            def __init__(self, iface):
+                pass
+
+            def initGui(self):
+                pass
+
+            def unload(self):
+                pass
+
         return DummyPlugin(iface)
 
-    # 3. If True, dependencies exist. Load normally.
+    # 2. Dependencies are OK - load the real plugin
     from .seisplotpy import SeisPlotPy
     return SeisPlotPy(iface)
