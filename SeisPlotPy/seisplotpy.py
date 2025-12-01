@@ -25,7 +25,7 @@
 import os
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
-from qgis.PyQt.QtWidgets import QAction
+from qgis.PyQt.QtWidgets import QAction, QMessageBox
 from .resources import *
 
 # Import the custom tool
@@ -103,6 +103,15 @@ class SeisPlotPy:
         # 4. Connect Tool Signals
         self.tool.canvas_moved.connect(self.broadcast_hover)
         self.tool.canvas_double_clicked.connect(self.broadcast_click)
+        
+        # 5. About action (menu only, no toolbar icon)
+        self.about_action = self.add_action(
+            icon_path,
+            text=self.tr(u'About SeisPlotPy'),
+            callback=self.show_about_dialog,
+            parent=self.iface.mainWindow(),
+            add_to_toolbar=False
+        )
 
         self.first_start = True
 
@@ -129,6 +138,23 @@ class SeisPlotPy:
             self.iface.mapCanvas().setMapTool(self.tool)
         else:
             self.iface.mapCanvas().unsetMapTool(self.tool)
+    
+    def show_about_dialog(self):
+        """Show a simple About dialog with author and support info."""
+        text = (
+            "SeisPlotPy is currently being developed and maintained by Arjun V H\n"
+            "Contact: arjunvelliyidathu@gmail.com\n\n"
+            "SeisPlotPy is released under the GPL-2.0 license.\n\n"
+            "Found a bug? Need a feature?\n"
+            "Please report it here:\n"
+            "https://github.com/arjun-vh/SeisPlotPy-QGIS/issues"
+        )
+
+        QMessageBox.information(
+            self.iface.mainWindow(),
+            "About SeisPlotPy",
+            text
+        )
 
     def broadcast_hover(self, point):
         """Send mouse coordinates to ALL windows (even hidden ones)."""
