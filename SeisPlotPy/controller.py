@@ -101,6 +101,16 @@ class MainController:
             self.view_highlight = None
         event.accept()
 
+    
+    def on_layer_deleted(self):
+        """Called automatically if the user deletes the layer from QGIS Layer Panel."""
+        self.qgis_layer = None
+        # Also clear the red highlight line if it exists
+        if self.view_highlight:
+            self.view_highlight.reset(QgsWkbTypes.LineGeometry)
+            self.view_highlight = None
+    # 
+
     def create_qgis_layer(self, x_coords, y_coords, crs=None):
         """Creates QGIS layer AND builds spatial index for navigation."""
         layer_name = os.path.basename(self.data_manager.file_path)
@@ -126,7 +136,12 @@ class MainController:
         pr.addFeatures([feat])
         layer.updateExtents()
         QgsProject.instance().addMapLayer(layer)
+        
         self.qgis_layer = layer
+        
+        # Connect signal to handle deletion safely ---
+        self.qgis_layer.willBeDeleted.connect(self.on_layer_deleted)
+        # ---------------------------------------------------
         
         if self.iface.mapCanvas():
             self.iface.mapCanvas().setExtent(layer.extent())
@@ -136,15 +151,25 @@ class MainController:
         """Helper to transform Map Canvas Point -> Layer CRS Point."""
         if self.qgis_layer is None: return point
         
-        canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-        layer_crs = self.qgis_layer.crs() 
+        # --- FIX: Added Try-Except block for RuntimeErrors ---
+        try:
+            # Check if the C++ object is still valid
+            if not self.qgis_layer.isValid():
+                self.qgis_layer = None
+                return point
 
-        if canvas_crs != layer_crs and layer_crs.isValid():
-            try:
+            canvas_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+            layer_crs = self.qgis_layer.crs() 
+
+            if canvas_crs != layer_crs and layer_crs.isValid():
                 xform = QgsCoordinateTransform(canvas_crs, layer_crs, QgsProject.instance())
                 return xform.transform(point)
-            except Exception:
-                return point 
+        except (RuntimeError, Exception):
+            # If the layer was deleted, this catches the error and prevents the crash
+            self.qgis_layer = None
+            return point
+        # ---------------------------------------------------
+            
         return point
 
     def handle_map_hover(self, point):
@@ -198,9 +223,23 @@ class MainController:
         self.map_marker.show()
 
     def highlight_map_extent(self, x_range):
-        """Draws a red line on the QGIS map showing the zoomed area."""
         if self.coord_tree is None or self.world_coords is None: return
-        if self.qgis_layer is None: return
+        
+        # Guard against deleted layer
+        if self.qgis_layer is None: 
+            if self.view_highlight: self.view_highlight.hide()
+            return
+            
+        # --- FIX: Additional check for validity ---
+        try:
+            if not self.qgis_layer.isValid():
+                self.qgis_layer = None
+                if self.view_highlight: self.view_highlight.hide()
+                return
+        except RuntimeError:
+            self.qgis_layer = None
+            return
+        # ------------------------------------------
 
         min_val, max_val = x_range
         start_idx, end_idx = 0, 0
@@ -245,8 +284,13 @@ class MainController:
             self.view_highlight.setColor(QColor(Qt.red))
             self.view_highlight.setWidth(4)
         
-        self.view_highlight.setToGeometry(geom, self.qgis_layer.crs())
-        self.view_highlight.show()
+        # Wrap in try-except in case layer CRS access fails
+        try:
+            if self.qgis_layer.isValid():
+                self.view_highlight.setToGeometry(geom, self.qgis_layer.crs())
+                self.view_highlight.show()
+        except:
+            pass
 
     # =========================================================================
     # --- CORE & UI LOGIC ---
@@ -580,10 +624,13 @@ class MainController:
             except Exception as e: QMessageBox.critical(self.view, "Processing Error", str(e))
     def reset_processing(self): self.apply_changes(); self.view.update_status("Reset to Raw Data")
     
-    
+    # --- UPDATED: Fixes the Squeezed Display Bug ---
     def update_display_only(self):
         if self.current_data is None: return
         
+        # 1. Determine correct X bounds from data, NOT spinboxes
+        # The spinboxes contain the VIEW limits (e.g. 1000-2000), 
+        # but the data might be traces 1002-1998 (due to integer snapping)
         if hasattr(self, 'x_vals') and self.x_vals is not None and self.x_vals.size > 0:
             x_min = self.x_vals[0]
             x_max = self.x_vals[-1]
@@ -591,6 +638,9 @@ class MainController:
             x_min = self.view.spin_x_min.value()
             x_max = self.view.spin_x_max.value()
             
+        # 2. Determine correct Y bounds from data
+        # Data is always full time range, so we must use the full time range for the Image Rect
+        # otherwise we squash 5 seconds of data into a 1 second view box
         if hasattr(self, 't_vals') and self.t_vals is not None:
             y_min = self.t_vals[0]
             y_max = self.t_vals[-1]
@@ -598,9 +648,10 @@ class MainController:
             y_min = self.view.spin_y_min.value()
             y_max = self.view.spin_y_max.value()
         
+        # 3. Display with DATA bounds
         self.view.display_seismic(self.current_data.T, x_range=(x_min, x_max), y_range=(y_min, y_max))
         self.update_contrast(); self.draw_horizons()
-    
+    # -----------------------------------------------
 
     def match_aspect_ratio(self):
         try:
@@ -649,11 +700,11 @@ class MainController:
         except Exception as e: QMessageBox.critical(self.view, "Export Failed", str(e))
     def run_attribute(self, attr_type):
         if self.data_manager is not None:
-            #Get current view range from the plot (what the user is looking at)
+            # 1. Get current view range from the plot (what the user is looking at)
             view_range = self.view.plot_widget.viewRange()
             x_min, x_max = view_range[0]
             
-            # Convert coordinates back to trace indices
+            # 2. Convert coordinates back to trace indices
             start_trace, end_trace = 0, 0
             header = self.view.combo_header.currentText()
             
@@ -683,12 +734,12 @@ class MainController:
             start_trace = max(0, start_trace)
             end_trace = min(self.data_manager.n_traces, end_trace)
             
-            # Force reload at FULL RESOLUTION (step=1) for the attribute math
-            # Not correct to calculate attributes on decimated data
+            # 3. CRITICAL: Force reload at FULL RESOLUTION (step=1) for the attribute math
+            # We don't want to calculate attributes on decimated data!
             self.view.update_status(f"Fetching high-res data for {attr_type}...")
             QApplication.processEvents()
             
-            # Update internal state so the 'Apply' button knows where the user is
+            # Update internal state so the 'Apply' button knows where we are
             self.view.spin_x_min.setValue(x_min)
             self.view.spin_x_max.setValue(x_max)
             self.view.chk_manual_step.setChecked(True) 
@@ -697,7 +748,7 @@ class MainController:
             # Perform the load
             self.load_data_internal(start_trace, end_trace, step=1, auto_fit=False)
 
-        # Calculate the attribute on the fresh, high-res data
+        # 4. Now calculate the attribute on the fresh, high-res data
         if self.current_data is None: return
         
         self.view.update_status(f"Calculating {attr_type}...")
@@ -720,7 +771,7 @@ class MainController:
                 if not ok: return
                 self.current_data = SeismicProcessing.attribute_rms(self.current_data, sr, window)
             
-            # Refresh display
+            # 5. Refresh display
             self.update_display_only()
             self.view.update_status(f"Displayed: {attr_type} (High Res)")
             
@@ -751,13 +802,14 @@ class MainController:
             within_clip = np.sum((amps >= -clip_val) & (amps <= clip_val))
             above_clip = np.sum(amps > clip_val)
             
-            # Create figure 
+            # Create figure with larger default size
             fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
             
-            # Calculate bin count (fewer bins = smoother histogram)
-            # Ensure int
+            # Calculate better bin count (fewer bins = smoother histogram)
+            # FIX 1: Ensure int
             n_bins_full = min(100, int(np.sqrt(len(amps))))  
             
+            # FIX 1: within_clip is a scalar (count), so len() fails. Use the scalar directly.
             n_bins_zoom = min(80, int(np.sqrt(within_clip)))
             
             # --- TOP PLOT: Full histogram (LOG SCALE) ---
@@ -781,7 +833,7 @@ class MainController:
             ax1.grid(True, alpha=0.3, linestyle=':')
             ax1.tick_params(axis='both', which='major', labelsize=12)
             
-            # Statistics box 
+            # Statistics box - LARGER
             stats_text = (
                 f'Total samples: {len(amps):,}\n'
                 f'Min: {amps.min():.2e}\n'
@@ -797,7 +849,7 @@ class MainController:
             ax1.text(0.02, 0.98, stats_text, transform=ax1.transAxes,
                     verticalalignment='top', 
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.9, pad=0.8),
-                    fontfamily='monospace', fontsize=11)  
+                    fontfamily='monospace', fontsize=11)  # Larger font
             
             # --- BOTTOM PLOT: Zoomed to display range ---
             clipped_amps = amps[(amps >= -clip_val) & (amps <= clip_val)]
@@ -819,6 +871,7 @@ class MainController:
             plt.tight_layout()
             
             # Option to save
+            # FIX 2: Use qgis.PyQt.QtWidgets or PyQt5
             from qgis.PyQt.QtWidgets import QMessageBox, QFileDialog
             result = QMessageBox.question(
                 self.view, 
