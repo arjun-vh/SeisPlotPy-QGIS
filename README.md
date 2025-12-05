@@ -102,6 +102,10 @@ Please report it here:
 
 https://github.com/arjun-vh/SeisPlotPy-QGIS/issues
 
+## Citation
+
+If you use SeisPlotPy in your work, please acknowledge the software. Citation format will be added in a future release
+
 
 
 
