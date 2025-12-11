@@ -3,14 +3,19 @@ from qgis.PyQt.QtWidgets import (QApplication, QFileDialog, QMessageBox, QInputD
                              QMenuBar, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QDoubleSpinBox, QDialog, QDialogButtonBox, 
                              QComboBox, QRadioButton, QButtonGroup, QAction)
-from qgis.PyQt.QtGui import QCursor, QIcon, QColor
+from qgis.PyQt.QtWidgets import (QApplication, QFileDialog, QMessageBox, QInputDialog, 
+                             QMenuBar, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
+                             QDoubleSpinBox, QDialog, QDialogButtonBox, 
+                             QComboBox, QRadioButton, QButtonGroup, QAction)
+from qgis.PyQt.QtGui import QCursor, QIcon, QColor, QPainter
 from qgis.PyQt.QtCore import Qt, QVariant
+import json
 
 # --- QGIS IMPORTS ---
 from qgis.core import (QgsVectorLayer, QgsFeature, QgsGeometry, 
                        QgsPointXY, QgsProject, QgsField, 
                        QgsCoordinateReferenceSystem, QgsCoordinateTransform,
-                       QgsWkbTypes)
+                       QgsWkbTypes, QgsSingleSymbolRenderer, QgsSymbol, QgsSimpleLineSymbolLayer)
 from qgis.gui import QgsProjectionSelectionDialog, QgsRubberBand
 
 
@@ -54,11 +59,19 @@ class MainController:
         self.map_marker = None
         self.qgis_layer = None 
         self.view_highlight = None 
-        self.world_coords = None   
+        self.world_coords = None
+        self.coord_step = 1  # Track decimation step for coordinate array   
         
 
         # --- Hook into the Window Close Event ---
         self.view.closeEvent = self.cleanup_on_close
+        
+        # Auto-save horizons on change
+        self.horizon_manager.horizon_visibility_changed.connect(self.save_horizons)
+        self.horizon_manager.horizon_removed.connect(self.save_horizons)
+        self.horizon_manager.horizon_color_changed.connect(self.save_horizons)
+        # We need to capture when a point is added too, which emits visibility changed? Yes, checked source.
+
         
 
         self.setup_menu()
@@ -75,6 +88,7 @@ class MainController:
         self.view.btn_export.clicked.connect(self.export_figure)
         self.view.chk_flip_x.stateChanged.connect(self.toggle_flip_x)
         self.view.chk_grid.stateChanged.connect(self.toggle_grid)
+        self.view.chk_smooth.stateChanged.connect(self.toggle_smooth)
         self.view.btn_preview_ratio.clicked.connect(self.match_aspect_ratio)
         self.view.plot_widget.sigRangeChanged.connect(self.sync_view_to_controls)
         self.view.combo_header.activated.connect(self.on_header_changed)
@@ -86,6 +100,7 @@ class MainController:
         
         # This line was causing the error because the method was missing
         self.horizon_manager.export_requested.connect(self.handle_horizon_export)
+        self.horizon_manager.publish_requested.connect(self.publish_horizon_to_map)
         
         self.view.plot_widget.scene().sigMouseClicked.connect(self.on_plot_clicked)
         
@@ -96,9 +111,18 @@ class MainController:
     # =========================================================================
     def cleanup_on_close(self, event):
         """Called when the user closes the Seismic Window."""
+        self.save_horizons() # Ensure saved
+        
+        # Ensure latest state is on the layer
+        self.update_layer_state()
+
         if self.view_highlight:
             self.view_highlight.reset(QgsWkbTypes.LineGeometry)
             self.view_highlight = None
+        
+        # CRITICAL CHANGE: Do NOT remove the layer from QGIS Project.
+        # The layer persists so it can be double-clicked later to re-open this window.
+        
         event.accept()
 
     
@@ -111,12 +135,14 @@ class MainController:
             self.view_highlight = None
     # 
 
-    def create_qgis_layer(self, x_coords, y_coords, crs=None):
+    def create_qgis_layer(self, x_coords, y_coords, crs=None, geom_params=None):
         """Creates QGIS layer AND builds spatial index for navigation."""
         layer_name = os.path.basename(self.data_manager.file_path)
         
         self.world_coords = np.column_stack((x_coords, y_coords))
         self.coord_tree = cKDTree(self.world_coords)
+        # For fresh loads, assume full resolution (step=1) since calculate_distance uses step=1
+        self.coord_step = 1
         self.view.update_status(f"Navigation Index Built: {len(x_coords)} points")
 
         crs_def = ""
@@ -144,8 +170,45 @@ class MainController:
         # ---------------------------------------------------
         
         if self.iface.mapCanvas():
-            self.iface.mapCanvas().setExtent(layer.extent())
+            # Transform extent to Map CRS if needed
+            map_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+            layer_extent = layer.extent()
+            
+            if crs is not None and crs.isValid() and map_crs != crs:
+                try:
+                    xform = QgsCoordinateTransform(crs, map_crs, QgsProject.instance())
+                    map_extent = xform.transformBoundingBox(layer_extent)
+                    self.iface.mapCanvas().setExtent(map_extent)
+                except:
+                    self.iface.mapCanvas().setExtent(layer_extent)
+            else:
+                self.iface.mapCanvas().setExtent(layer_extent)
+                
             self.iface.mapCanvas().refresh()
+            
+        # Metadata for Persistence
+        layer.setCustomProperty("seisplotpy_path", self.data_manager.file_path)
+        
+        # SAVE GEOMETRY PARAMS (Headers/Scalar used)
+        # Consolidate on GeometryDialog format
+        import json
+        if geom_params:
+            layer.setCustomProperty("seisplotpy_geometry_params", json.dumps(geom_params))
+        else:
+            # Fallback default
+            params = {"x_key": "CDP_X", "y_key": "CDP_Y", "use_header": True, "scalar_key": "Source_Group_Scalar"}
+            layer.setCustomProperty("seisplotpy_geometry_params", json.dumps(params))
+        
+        self.update_layer_state()
+
+    def update_layer_state(self):
+        """Updates the JSON state stored on the layer custom properties."""
+        if self.qgis_layer and self.qgis_layer.isValid():
+            try:
+                state = self.get_state()
+                if state:
+                    self.qgis_layer.setCustomProperty("seisplotpy_state", json.dumps(state))
+            except: pass
 
     def _transform_mouse_point(self, point):
         """Helper to transform Map Canvas Point -> Layer CRS Point."""
@@ -179,22 +242,47 @@ class MainController:
         search_point = self._transform_mouse_point(point)
         dist, idx = self.coord_tree.query([search_point.x(), search_point.y()])
 
-        mupp = self.iface.mapCanvas().mapUnitsPerPixel()
-        tolerance = mupp * 20 
+        # Calculate tolerance in LAYER UNITS
+        # MapUnitsPerPixel is in Map CRS (e.g. Degrees)
+        # We need to know how big a pixel is in Layer CRS (e.g. Meters)
         
+        map_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+        layer_crs = self.qgis_layer.crs() if self.qgis_layer else map_crs
+        
+        pixel_size_map = self.iface.mapCanvas().mapUnitsPerPixel()
+        tolerance = pixel_size_map * 20 # Default fallback
+        
+        if map_crs != layer_crs and layer_crs.isValid():
+            try:
+                # Approximate 1 pixel vector transformation
+                # We interpret map_units_per_pixel as a generic scale factor
+                # Better: Measure 1 pixel distance at the point location
+                pt_map = point
+                pt_map_plus_10px = QgsPointXY(point.x() + pixel_size_map * 10, point.y())
+                
+                xform = QgsCoordinateTransform(map_crs, layer_crs, QgsProject.instance())
+                pt_layer = xform.transform(pt_map)
+                pt_layer_plus = xform.transform(pt_map_plus_10px)
+                
+                # Distance in layer units for 10 pixels
+                dist_layer = np.sqrt(pt_layer.sqrDist(pt_layer_plus))
+                tolerance = dist_layer * 2 # 20 pixels total tolerance (10px * 2)
+            except: pass
+
         if dist > tolerance: 
             if self.map_marker: self.map_marker.hide()
             return
-
+            
+        real_idx = idx * self.coord_step
         plot_x_value = 0
         current_header = self.view.combo_header.currentText()
         
         if current_header == "Trace Index":
-            plot_x_value = idx
-        elif self.active_header_map is not None and idx < len(self.active_header_map):
-            plot_x_value = self.active_header_map[idx]
+            plot_x_value = real_idx
+        elif self.active_header_map is not None and real_idx < len(self.active_header_map):
+            plot_x_value = self.active_header_map[real_idx]
         else:
-            plot_x_value = idx
+            plot_x_value = real_idx
 
         self.update_map_marker(plot_x_value)
 
@@ -205,8 +293,20 @@ class MainController:
         search_point = self._transform_mouse_point(point)
         dist, _ = self.coord_tree.query([search_point.x(), search_point.y()])
         
-        mupp = self.iface.mapCanvas().mapUnitsPerPixel()
-        tolerance = mupp * 10
+        # Tolerance logic (Duplicated from hover - should refactor but this is safe)
+        map_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+        layer_crs = self.qgis_layer.crs() if self.qgis_layer else map_crs
+        pixel_size_map = self.iface.mapCanvas().mapUnitsPerPixel()
+        tolerance = pixel_size_map * 10 
+        
+        if map_crs != layer_crs and layer_crs.isValid():
+            try:
+                pt_map = point
+                pt_map_plus = QgsPointXY(point.x() + pixel_size_map * 10, point.y())
+                xform = QgsCoordinateTransform(map_crs, layer_crs, QgsProject.instance())
+                dist_layer = np.sqrt(xform.transform(pt_map).sqrDist(xform.transform(pt_map_plus)))
+                tolerance = dist_layer
+            except: pass
         
         if dist < tolerance:
             self.view.showNormal() 
@@ -248,8 +348,10 @@ class MainController:
         n_points = self.world_coords.shape[0]
 
         if header == "Trace Index":
-            start_idx = int(min_val)
-            end_idx = int(max_val)
+            # Account for coordinate decimation
+            # If coord_step=10, then trace 100 maps to world_coords[10]
+            start_idx = int(min_val / self.coord_step)
+            end_idx = int(max_val / self.coord_step)
         elif self.active_header_map is not None:
             try:
                 if self.active_header_map[0] < self.active_header_map[-1]:
@@ -291,6 +393,167 @@ class MainController:
                 self.view_highlight.show()
         except:
             pass
+
+    # =========================================================================
+    # --- STATE PERSISTENCE ---
+    # =========================================================================
+
+    def get_state(self):
+        """Returns a dict of current state for QGIS project storage."""
+        if not self.data_manager: return None
+        state = {
+            "file_path": self.data_manager.file_path,
+            "x_min": self.view.spin_x_min.value(),
+            "x_max": self.view.spin_x_max.value(),
+            "y_min": self.view.spin_y_min.value(),
+            "y_max": self.view.spin_y_max.value(),
+            "header": self.view.combo_header.currentText(),
+            "contrast": self.view.spin_contrast.value(),
+            "cmap": self.view.combo_cmap.currentText(),
+            "domain": self.view.combo_domain.currentText(),
+            "flip_x": self.view.chk_flip_x.isChecked(),
+            "grid": self.view.chk_grid.isChecked(),
+            "manual_step": self.view.chk_manual_step.isChecked(),
+            "step_val": self.view.spin_step.value()
+        }
+        return state
+
+    def restore_state(self, state):
+        """Restores state from dict and rebuilds navigation index."""
+        if not state: return
+        
+        path = state.get("file_path", "")
+        if not path or not os.path.exists(path):
+            self.view.update_status(f"File not found: {path}"); return
+
+        try:
+            self.view.update_status("Restoring session...")
+            
+            # 1. Initialize Data Manager if not already set
+            if not self.data_manager:
+                self.data_manager = SeismicDataManager(path)
+            
+            self.full_cum_dist = None; self.dist_unit = "m"
+            
+            # Re-enable UI Elements
+            self.action_text_header.setEnabled(True); self.action_header_qc.setEnabled(True)
+            self.action_agc.setEnabled(True); self.action_filter.setEnabled(True)
+            self.action_reset.setEnabled(True); self.action_spectrum.setEnabled(True)
+            self.action_dist.setEnabled(True); self.action_histogram.setEnabled(True)
+            self.act_env.setEnabled(True); self.act_phase.setEnabled(True)
+            self.act_cos.setEnabled(True); self.act_freq.setEnabled(True)
+            self.act_rms.setEnabled(True)
+            
+            self.view.chk_manual_step.setChecked(False)
+            self.view.spin_step.setEnabled(False)
+            self.view.combo_header.clear(); self.view.combo_header.addItem("Trace Index")
+            self.view.combo_header.addItems(self.data_manager.available_headers)
+
+            # Restore settings
+            if "header" in state: self.view.combo_header.setCurrentText(state["header"])
+            self.on_header_changed() 
+
+            if "cmap" in state: self.view.combo_cmap.setCurrentText(state["cmap"])
+            if "contrast" in state: self.view.spin_contrast.setValue(float(state["contrast"]))
+            if "domain" in state: self.view.combo_domain.setCurrentText(state["domain"])
+            if "flip_x" in state: self.view.chk_flip_x.setChecked(state["flip_x"])
+            if "grid" in state: self.view.chk_grid.setChecked(state["grid"])
+            
+            if state.get("manual_step", False):
+                self.view.chk_manual_step.setChecked(True)
+                self.view.spin_step.setValue(int(state.get("step_val", 1)))
+
+            self.apply_changes()
+            
+            x_min = float(state.get("x_min", 0))
+            x_max = float(state.get("x_max", self.data_manager.n_traces))
+            
+            if x_max <= x_min or (x_max - x_min) < 10:
+                x_min = 0; x_max = self.data_manager.n_traces
+                
+            self.view.spin_x_min.setValue(x_min)
+            self.view.spin_x_max.setValue(x_max)
+            if "y_min" in state: self.view.spin_y_min.setValue(float(state["y_min"]))
+            if "y_max" in state: self.view.spin_y_max.setValue(float(state["y_max"]))
+            
+            # --- Rebuild Navigation Index from Layer Metadata ---
+            if self.qgis_layer and self.qgis_layer.isValid():
+                # Defaults
+                x_key = "CDP_X"; y_key = "CDP_Y"; use_header = True
+                scalar_key = "Source_Group_Scalar"; manual_val = 1.0
+                
+                # Load saved geometry params
+                try:
+                    p_json = self.qgis_layer.customProperty("seisplotpy_geometry_params")
+                    if p_json:
+                        p = json.loads(str(p_json))
+                        x_key = p.get("x_key", x_key)
+                        y_key = p.get("y_key", y_key)
+                        use_header = p.get("use_header", use_header)
+                        scalar_key = p.get("scalar_key", scalar_key)
+                        manual_val = float(p.get("manual_val", manual_val))
+                except Exception: pass
+
+                # Build the Tree
+                try:
+                    self.coord_step = 10 
+                    raw_x = self.data_manager.get_header_slice(x_key, 0, self.data_manager.n_traces, self.coord_step)
+                    raw_y = self.data_manager.get_header_slice(y_key, 0, self.data_manager.n_traces, self.coord_step)
+                    
+                    if use_header:
+                        scalars = self.data_manager.get_header_slice(scalar_key, 0, self.data_manager.n_traces, self.coord_step)
+                        cdp_x = SeismicProcessing.apply_scalar(raw_x, scalars)
+                        cdp_y = SeismicProcessing.apply_scalar(raw_y, scalars)
+                    else:
+                        cdp_x = raw_x * manual_val
+                        cdp_y = raw_y * manual_val
+                    
+                    if np.any(cdp_x) and np.any(cdp_y):
+                        self.world_coords = np.column_stack((cdp_x, cdp_y))
+                        self.coord_tree = cKDTree(self.world_coords)
+                        self.view.update_status(f"Navigation Index Rebuilt: {len(cdp_x)} points")
+                except Exception as e:
+                    print(f"SeisPlotPy: Error calculating coordinates: {e}")
+
+            elif not self.qgis_layer:
+                # Fallback if no layer exists
+                try:
+                    cdp_x = self.data_manager.get_header_slice('CDP_X', 0, self.data_manager.n_traces, 10)
+                    cdp_y = self.data_manager.get_header_slice('CDP_Y', 0, self.data_manager.n_traces, 10)
+                    if np.any(cdp_x) and np.any(cdp_y):
+                         self.create_qgis_layer(cdp_x, cdp_y, None) 
+                except: pass
+            
+            self.load_horizons()
+            
+            self.view.btn_load.setEnabled(False)
+            self.view.btn_load.setText(f"Linked: {os.path.basename(path)}")
+            
+        except Exception as e:
+            self.view.update_status(f"Restore failed: {e}")
+            print(f"SeisPlotPy Restore Error: {e}")
+
+    def save_horizons(self):
+        """Saves horizons to sidecar JSON."""
+        if not self.data_manager: return
+        path = self.data_manager.file_path + ".horizons.json"
+        try:
+            data = self.horizon_manager.get_state()
+            with open(path, 'w') as f:
+                json.dump(data, f)
+        except: pass
+
+    def load_horizons(self):
+        """Loads horizons from sidecar JSON."""
+        if not self.data_manager: return
+        path = self.data_manager.file_path + ".horizons.json"
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                self.horizon_manager.restore_state(data)
+                self.draw_horizons()
+            except: pass
 
     # =========================================================================
     # --- CORE & UI LOGIC ---
@@ -372,7 +635,7 @@ class MainController:
             self.full_cum_dist = dist
             
             # 3. Create Layer with CRS
-            self.create_qgis_layer(scaled_x, scaled_y, crs)
+            self.create_qgis_layer(scaled_x, scaled_y, crs, settings)
 
             if self.view.combo_header.findText("Cumulative Distance") == -1:
                 self.view.combo_header.insertItem(1, "Cumulative Distance")
@@ -465,6 +728,45 @@ class MainController:
             self.view.update_status("Load failed.")
             QMessageBox.critical(self.view, "Error", f"Failed to load file:\n{str(e)}")
 
+    def load_file_from_path(self, path, load_data_only=False):
+        """Helper to load a file directly (internal use)."""
+        if not path or not os.path.exists(path): return
+        self.view.update_status("Loading... Please wait")
+        QApplication.processEvents()
+        
+        try:
+            self.data_manager = SeismicDataManager(path)
+            self.full_cum_dist = None; self.dist_unit = "m"
+            
+            self.action_text_header.setEnabled(True); self.action_header_qc.setEnabled(True)
+            self.action_agc.setEnabled(True); self.action_filter.setEnabled(True); self.action_reset.setEnabled(True)
+            self.action_spectrum.setEnabled(True); self.action_dist.setEnabled(True)
+            self.act_env.setEnabled(True); self.act_phase.setEnabled(True); self.act_cos.setEnabled(True)
+            self.act_freq.setEnabled(True); self.act_rms.setEnabled(True)
+            self.view.chk_manual_step.setChecked(False); self.view.spin_step.setEnabled(False)
+            self.view.combo_header.clear(); self.view.combo_header.addItem("Trace Index")
+            self.view.combo_header.addItems(self.data_manager.available_headers)
+            if "CDP" in self.data_manager.available_headers:
+                self.view.combo_header.setCurrentText("CDP")
+                self.active_header_map = self.data_manager.get_header_slice("CDP", 0, self.data_manager.n_traces, 1)
+            else:
+                self.view.combo_header.setCurrentText("Trace Index"); self.active_header_map = None
+            total_traces = self.data_manager.n_traces
+            smart_step = max(1, int(total_traces / 2000))
+            
+            # Pass load_data_only flag down
+            self.load_data_internal(0, total_traces, smart_step, auto_fit=True, create_layer=not load_data_only)
+            
+            self.view.update_status(f"Loaded: {path.split('/')[-1]}\nTraces: {total_traces}")
+            self.view.btn_load.setEnabled(False)
+            self.view.btn_load.setText(f"Linked: {os.path.basename(path)}")
+            if hasattr(self, 'action_load_menu'): self.action_load_menu.setEnabled(False)
+            self.action_histogram.setEnabled(True)
+        except Exception as e:
+            self.view.update_status("Load failed.")
+            print(f"Load failed: {e}")
+
+
     def handle_horizon_export(self, index):
         if not self.data_manager: QMessageBox.warning(self.view, "Error", "No seismic data loaded."); return
         h = self.horizon_manager.horizons[index]; points = h['points']
@@ -538,10 +840,12 @@ class MainController:
         self.is_programmatic_update = True
         self.view.plot_widget.setXRange(target_x_min, target_x_max, padding=0)
         self.view.plot_widget.setYRange(self.view.spin_y_min.value(), self.view.spin_y_max.value(), padding=0)
+        self.view.plot_widget.setYRange(self.view.spin_y_min.value(), self.view.spin_y_max.value(), padding=0)
         self.is_programmatic_update = False
+        self.update_layer_state() # Sync to layer
         self.view.update_status(f"Loaded: {self.data_manager.file_path.split('/')[-1]} (Subset)")
 
-    def load_data_internal(self, start, end, step, auto_fit=False):
+    def load_data_internal(self, start, end, step, auto_fit=False, create_layer=True):
         try:
             self.loaded_start_trace = max(0, start); self.loaded_end_trace = min(self.data_manager.n_traces, end)
             if self.loaded_start_trace >= self.loaded_end_trace: return
@@ -573,6 +877,14 @@ class MainController:
     def toggle_manual_step(self, state): self.view.spin_step.setEnabled(state == 2)
     def toggle_flip_x(self, state): self.view.plot_widget.getPlotItem().invertX(state == 2)
     def toggle_grid(self, state): self.view.plot_widget.showGrid(x=(state == 2), y=(state == 2))
+    
+    def toggle_smooth(self, state):
+        """Enables Bilinear Interpolation (Smooth Pixmap Transform)."""
+        # State 2 means Checked
+        self.view.plot_widget.setRenderHint(QPainter.SmoothPixmapTransform, state == 2)
+        # We also need to trigger an update to see changes immediately
+        self.view.plot_widget.update()
+
     def change_colormap(self, text): self.view.set_colormap(text)
     def draw_horizons(self):
         for item in self.horizon_items: self.view.plot_widget.removeItem(item)
@@ -681,7 +993,7 @@ class MainController:
             p = self.view.spin_contrast.value()
             clip_val = np.percentile(np.abs(self.current_data), p) if self.current_data.size > 0 else 1.0
             extent = [self.x_vals[0], self.x_vals[-1], self.t_vals[-1], self.t_vals[0]]
-            im = ax.imshow(self.current_data, cmap=self.view.combo_cmap.currentText(), aspect='auto', extent=extent, vmin=-clip_val, vmax=clip_val, interpolation='bilinear')
+            im = ax.imshow(self.current_data, cmap=self.view.combo_cmap.currentText(), aspect='auto', extent=extent, vmin=-clip_val, vmax=clip_val, interpolation='lanczos')
             if self.view.chk_grid.isChecked():
                 ax.grid(True, alpha=0.3, linestyle='--')
             else:
@@ -779,6 +1091,94 @@ class MainController:
             QMessageBox.critical(self.view, "Attribute Error", str(e))
             self.view.update_status("Error calculating attribute")
     
+    def publish_horizon_to_map(self, index):
+        """Creates a QGIS vector layer for the selected horizon."""
+        if not self.data_manager or not self.qgis_layer:
+            self.view.update_status("Error: No seismic navigation layer linked.")
+            return
+
+        horizon = self.horizon_manager.horizons[index]
+        points = horizon['points']
+        if not points:
+            self.view.update_status("Error: Horizon is empty.")
+            return
+
+        name = horizon['name']
+        color_hex = horizon['color']
+
+        try:
+            # 1. Retrieve Geometry Settings
+            x_key = "CDP_X"; y_key = "CDP_Y"; use_header = True
+            scalar_key = "Source_Group_Scalar"; manual_val = 1.0
+
+            p_json = self.qgis_layer.customProperty("seisplotpy_geometry_params")
+            if p_json:
+                p = json.loads(str(p_json))
+                x_key = p.get("x_key", x_key)
+                y_key = p.get("y_key", y_key)
+                use_header = p.get("use_header", use_header)
+                scalar_key = p.get("scalar_key", scalar_key)
+                manual_val = float(p.get("manual_val", manual_val))
+
+            # 2. Extract Trace Indices
+            sorted_pts = sorted(points, key=lambda k: k[0])
+            trace_indices = np.array([int(p[0]) for p in sorted_pts])
+            times = np.array([p[1] for p in sorted_pts])
+
+            # 3. Fetch Coordinate Arrays (Full Line)
+            raw_x = self.data_manager.get_header_slice(x_key, 0, self.data_manager.n_traces, 1)
+            raw_y = self.data_manager.get_header_slice(y_key, 0, self.data_manager.n_traces, 1)
+            
+            if use_header:
+                scalars = self.data_manager.get_header_slice(scalar_key, 0, self.data_manager.n_traces, 1)
+                full_x = SeismicProcessing.apply_scalar(raw_x, scalars)
+                full_y = SeismicProcessing.apply_scalar(raw_y, scalars)
+            else:
+                full_x = raw_x * manual_val
+                full_y = raw_y * manual_val
+
+            # 4. Map Horizon Indices to Coordinates
+            trace_indices = np.clip(trace_indices, 0, len(full_x) - 1)
+            mapped_x = full_x[trace_indices]
+            mapped_y = full_y[trace_indices]
+
+            # 5. Create Vector Layer
+            layer_crs = self.qgis_layer.crs().authid()
+            crs_def = f"?crs={layer_crs}" if layer_crs else ""
+            
+            vl = QgsVectorLayer(f"LineString{crs_def}", f"{name} (Horizon)", "memory")
+            pr = vl.dataProvider()
+            
+            pr.addAttributes([QgsField("first_trace", QVariant.Int), 
+                              QgsField("last_trace", QVariant.Int),
+                              QgsField("avg_time", QVariant.Double)])
+            vl.updateFields()
+
+            # Build Geometry
+            qgs_pts = [QgsPointXY(x, y) for x, y in zip(mapped_x, mapped_y)]
+            feat = QgsFeature()
+            feat.setGeometry(QgsGeometry.fromPolylineXY(qgs_pts))
+            feat.setAttributes([int(trace_indices[0]), int(trace_indices[-1]), float(np.mean(times))])
+            
+            pr.addFeatures([feat])
+            vl.updateExtents()
+            
+            # 6. Apply Style
+            symbol = QgsSymbol.defaultSymbol(vl.geometryType())
+            symbol.setColor(QColor(color_hex))
+            symbol.setWidth(0.8)
+            vl.setRenderer(QgsSingleSymbolRenderer(symbol))
+            
+            # 7. Add to Project
+            QgsProject.instance().addMapLayer(vl)
+            
+            # --- STATUS UPDATE ONLY (No Pop-up) ---
+            self.view.update_status(f"Published horizon '{name}' to map.")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self.view, "Error", f"Failed to publish horizon: {e}")
     def show_amplitude_histogram(self):
         """Display amplitude distribution with percentile clip lines"""
         if self.current_data is None:

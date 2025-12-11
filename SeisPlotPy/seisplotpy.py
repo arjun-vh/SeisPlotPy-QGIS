@@ -13,16 +13,16 @@
  ***************************************************************************/
 
 /***************************************************************************
- *                                                                         *
- *   This program is free software; you can redistribute it and/or modify  *
- *   it under the terms of the GNU General Public License as published by  *
- *   the Free Software Foundation; either version 2 of the License, or     *
- *   (at your option) any later version.                                   *
- *                                                                         *
+ * *
+ * This program is free software; you can redistribute it and/or modify  *
+ * it under the terms of the GNU General Public License as published by  *
+ * the Free Software Foundation; either version 2 of the License, or     *
+ * (at your option) any later version.                                   *
+ * *
  ***************************************************************************/
 """
-# -*- coding: utf-8 -*-
 import os
+import json
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import QAction, QMessageBox
@@ -112,6 +112,11 @@ class SeisPlotPy:
             parent=self.iface.mainWindow(),
             add_to_toolbar=False
         )
+        
+        # 6. Connect Project Persistence Signals
+        from qgis.core import QgsProject
+        QgsProject.instance().writeProject.connect(self.writeProject)
+        QgsProject.instance().readProject.connect(self.readProject)
 
         self.first_start = True
 
@@ -163,8 +168,215 @@ class SeisPlotPy:
             if ctrl.view.isVisible() and hasattr(ctrl, 'handle_map_hover'):
                 ctrl.handle_map_hover(point)
 
+    def writeProject(self, doc):
+        """Called when QGIS saves the project. Saves navigation layers logic."""
+        # We need to save the MEMORY layers because QGIS doesn't save them.
+        # We find them by looking for our custom property.
+        
+        root = doc.documentElement()
+        plugin_node = doc.createElement("SeisPlotPy")
+        
+        from qgis.core import QgsProject
+        layers = QgsProject.instance().mapLayers().values()
+        
+        for layer in layers:
+            # Check if this is one of our layers
+            path = layer.customProperty("seisplotpy_path")
+            if not path: continue
+            
+            state_json = layer.customProperty("seisplotpy_state")
+            
+            # Create Node
+            layer_node = doc.createElement("NavLayer")
+            layer_node.setAttribute("path", str(path))
+            if state_json:
+                layer_node.setAttribute("state", str(state_json))
+            
+            # Save Geometry Params (Critical for custom headers)
+            geom_params = layer.customProperty("seisplotpy_geometry_params")
+            if geom_params:
+                layer_node.setAttribute("geometry_params", str(geom_params))
+            
+            # Save CRS - Critical for memory layers
+            if layer.crs().isValid():
+                layer_node.setAttribute("crs", layer.crs().authid())
+
+            # Serialize Geometry (The Red Line)
+            try:
+                # We expect 1 feature
+                for feat in layer.getFeatures():
+                    geom = feat.geometry()
+                    wkt = geom.asWkt()
+                    layer_node.setAttribute("wkt", wkt)
+                    break 
+            except: pass
+            
+            plugin_node.appendChild(layer_node)
+            
+        root.appendChild(plugin_node)
+
+    def readProject(self, doc):
+        """Called when QGIS opens a project. Restores custom properties and CRS."""
+        root = doc.documentElement()
+        plugin_node = root.firstChildElement("SeisPlotPy")
+        if plugin_node.isNull(): return
+        
+        from qgis.core import QgsProject, QgsCoordinateReferenceSystem, QgsFeature, QgsGeometry
+        
+        # Build a map of saved layer info
+        saved_layers = {}
+        layer_node = plugin_node.firstChildElement("NavLayer")
+        while not layer_node.isNull():
+            path = layer_node.attribute("path")
+            state = layer_node.attribute("state")
+            wkt = layer_node.attribute("wkt")
+            crs_id = layer_node.attribute("crs")
+            geom_params = layer_node.attribute("geometry_params")
+            
+            if path:
+                layer_name = os.path.basename(path)
+                saved_layers[layer_name] = {
+                    "path": path, 
+                    "state": state, 
+                    "wkt": wkt,
+                    "crs": crs_id,
+                    "geometry_params": geom_params
+                }
+            
+            layer_node = layer_node.nextSiblingElement("NavLayer")
+        
+        # QGIS 3.x auto-restores memory layers, but often loses CRS and Custom Props.
+        # We find them by name and patch them up.
+        for layer in QgsProject.instance().mapLayers().values():
+            layer_name = layer.name()
+            if layer_name in saved_layers:
+                info = saved_layers[layer_name]
+                
+                # 1. Restore Metadata (Link to Plugin)
+                layer.setCustomProperty("seisplotpy_path", info["path"])
+                if info["state"]:
+                    layer.setCustomProperty("seisplotpy_state", info["state"])
+                if info["geometry_params"]:
+                    layer.setCustomProperty("seisplotpy_geometry_params", info["geometry_params"])
+                
+                # 2. Fix CRS (Crucial: Memory layers default to 4326 on load)
+                if info["crs"]:
+                     crs = QgsCoordinateReferenceSystem(info["crs"])
+                     if crs.isValid() and layer.crs() != crs:
+                         layer.setCrs(crs)
+                
+                # 3. Restore Geometry (CRITICAL: QGIS restores layer shell but wipes features)
+                if layer.featureCount() == 0 and info["wkt"]:
+                    try:
+                        pr = layer.dataProvider()
+                        feat = QgsFeature()
+                        feat.setGeometry(QgsGeometry.fromWkt(info["wkt"]))
+                        
+                        # Attributes: [filename, traces] - we assume 0 traces for now as data isn't loaded
+                        feat.setAttributes([layer_name, 0])
+                        
+                        pr.addFeatures([feat])
+                        layer.updateExtents()
+                    except Exception as e:
+                        # Log error if geometry restoration fails
+                        print(f"SeisPlotPy: Failed to restore geometry for {layer_name}: {e}")
+                
+                 # Trigger re-render extent
+                if self.iface.mapCanvas():
+                     layer.updateExtents()
+                     self.iface.mapCanvas().refresh()
+
     def broadcast_click(self, point):
-        """Send double click to ALL windows (including hidden/closed ones)."""
+        """Handle double-click: Open window if clicking a known layer."""
+        
+        # 1. Propagate to open windows (Standard behavior)
         for ctrl in self.controllers:
             if hasattr(ctrl, 'handle_map_click'):
                 ctrl.handle_map_click(point)
+                
+        # 2. Check for Navigation Layer hits
+        from qgis.core import QgsProject, QgsGeometry, QgsFeatureRequest, QgsMapLayer, QgsCoordinateTransform
+        
+        layers = self.iface.mapCanvas().layers() 
+        map_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
+        
+        # Define search tolerance (e.g., 5 pixels) in Map Units
+        tol = self.iface.mapCanvas().mapUnitsPerPixel() * 5
+
+        for layer in layers:
+            # Only check Vector Layers
+            if layer.type() != QgsMapLayer.VectorLayer: continue
+            
+            # Check for our plugin's custom property
+            path = layer.customProperty("seisplotpy_path")
+            if not path: continue
+            
+            # Create the search rectangle in MAP coordinates
+            search_rect_map = QgsGeometry.fromPointXY(point).buffer(tol, 5).boundingBox()
+            
+            # Transform that rectangle to LAYER coordinates if needed
+            if layer.crs() != map_crs:
+                try:
+                    xform = QgsCoordinateTransform(map_crs, layer.crs(), QgsProject.instance())
+                    search_rect_layer = xform.transformBoundingBox(search_rect_map)
+                except Exception as e:
+                    print(f"SeisPlotPy: Transform error for {layer.name()}: {e}")
+                    continue
+            else:
+                search_rect_layer = search_rect_map
+            
+            # Query the layer using the Transformed Rectangle
+            request = QgsFeatureRequest().setFilterRect(search_rect_layer)
+            
+            # We only need to know if ANY feature was hit
+            iterator = layer.getFeatures(request)
+            has_feature = False
+            for feat in iterator:
+                has_feature = True
+                break 
+            
+            if has_feature:
+                self.open_layer_window(layer, path)
+                return 
+
+    def open_layer_window(self, layer, path):
+        # Check if already open
+        for ctrl in self.controllers:
+            if ctrl.data_manager and ctrl.data_manager.file_path == path:
+                ctrl.view.showNormal()
+                ctrl.view.activateWindow()
+                ctrl.view.raise_()
+                return
+
+        # Open New
+        from .controller import MainController
+        try:
+            state_json = layer.customProperty("seisplotpy_state")
+            state = json.loads(state_json) if state_json else None
+            
+            new_controller = MainController(self.iface)
+            
+            # Link to existing layer
+            new_controller.qgis_layer = layer
+            layer.willBeDeleted.connect(new_controller.on_layer_deleted) 
+            
+            # Initialize with file (metadata only, no new layer creation)
+            new_controller.load_file_from_path(path, load_data_only=True)
+            
+            if state:
+                new_controller.restore_state(state)
+            else:
+                # Fallback: If no state exists (old save), force a restore
+                new_controller.restore_state({"file_path": path})
+
+            self.controllers.append(new_controller)
+            
+            # Show the window explicitly
+            new_controller.view.showNormal()
+            new_controller.view.activateWindow()
+            new_controller.view.raise_()
+                
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self.iface.mainWindow(), "Error", f"Failed to open line: {e}")
