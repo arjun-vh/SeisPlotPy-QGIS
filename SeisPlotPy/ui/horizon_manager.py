@@ -11,6 +11,7 @@ import numpy as np
 import os
 
 class HorizonManager(QDialog):
+    publish_requested = pyqtSignal(int)
     picking_toggled = pyqtSignal(bool, str)
     horizon_visibility_changed = pyqtSignal()
     horizon_color_changed = pyqtSignal()
@@ -88,28 +89,54 @@ class HorizonManager(QDialog):
 
     def refresh_table(self):
         self.table.setRowCount(len(self.horizons))
+        # Clear old radio buttons from group
         for btn in self.pick_group.buttons(): self.pick_group.removeButton(btn)
         
         for i, h in enumerate(self.horizons):
+            # 1. Active Radio Button
             rb = QRadioButton(); rb.setChecked(i == self.active_horizon_index)
             rb.toggled.connect(lambda c, idx=i: self.set_active_horizon(idx) if c else None)
             self.pick_group.addButton(rb)
             widget_rb = QWidget(); l = QHBoxLayout(widget_rb); l.addWidget(rb); l.setAlignment(Qt.AlignCenter); l.setContentsMargins(0,0,0,0)
             self.table.setCellWidget(i, 0, widget_rb)
             
+            # 2. Name
             self.table.setItem(i, 1, QTableWidgetItem(h['name']))
             
+            # 3. Color
             btn_col = QPushButton(); btn_col.setStyleSheet(f"background-color: {h['color']}; border: none;")
             btn_col.clicked.connect(lambda _, idx=i: self.change_color(idx))
             self.table.setCellWidget(i, 2, btn_col)
             
+            # 4. Point Count
             item_pts = QTableWidgetItem(str(len(h['points'])))
             item_pts.setFlags(item_pts.flags() ^ Qt.ItemIsEditable) 
             self.table.setItem(i, 3, item_pts)
             
-            btn_del = QPushButton("X"); btn_del.setStyleSheet("color: red; font-weight: bold;")
+            # 5. Actions (Publish + Delete) - NEW CODE
+            action_widget = QWidget()
+            action_layout = QHBoxLayout(action_widget)
+            action_layout.setContentsMargins(2, 2, 2, 2)
+            action_layout.setSpacing(4)
+            
+            # Map Button
+            btn_map = QPushButton("Map")
+            btn_map.setToolTip("Publish horizon as a layer to QGIS Map Canvas")
+            # Greenish style to indicate 'Go' / 'Push'
+            btn_map.setStyleSheet("background-color: #e6ffe6; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
+            btn_map.setFixedWidth(40)
+            btn_map.clicked.connect(lambda _, idx=i: self.publish_requested.emit(idx))
+            
+            # Delete Button
+            btn_del = QPushButton("X")
+            btn_del.setToolTip("Delete Horizon")
+            btn_del.setStyleSheet("background-color: #ffcccc; color: red; font-weight: bold; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
+            btn_del.setFixedWidth(25)
             btn_del.clicked.connect(lambda _, idx=i: self.delete_horizon(idx))
-            self.table.setCellWidget(i, 4, btn_del)
+            
+            action_layout.addWidget(btn_map)
+            action_layout.addWidget(btn_del)
+            self.table.setCellWidget(i, 4, action_widget)
             
         self.btn_pick.setEnabled(len(self.horizons) > 0)
 
@@ -179,3 +206,13 @@ class HorizonManager(QDialog):
     def request_export(self):
         if self.active_horizon_index != -1: self.export_requested.emit(self.active_horizon_index)
         else: QMessageBox.warning(self, "Warning", "No horizon selected.")
+
+    def get_state(self):
+        """Returns list of horizons for serialization."""
+        return self.horizons
+
+    def restore_state(self, horizons_data):
+        """Restores horizons from list."""
+        if not horizons_data: return
+        self.horizons = horizons_data
+        self.refresh_table()
