@@ -982,34 +982,93 @@ class MainController:
             self.view.img_item.setImage(self.current_data.T, levels=[-clip_val, clip_val], autoLevels=False)
         except Exception: pass
     def export_figure(self):
-        if self.current_data is None: QMessageBox.warning(self.view, "Warning", "No data to export."); return
-        dpi, ok = QInputDialog.getInt(self.view, "Export Settings", "DPI (Resolution):", 300, 72, 1200)
+        if self.current_data is None: 
+            QMessageBox.warning(self.view, "Warning", "No data to export.")
+            return
+            
+        dpi, ok = QInputDialog.getInt(self.view, "Export Settings", "DPI (Resolution):", 600, 72, 2400)
         if not ok: return
+        
         file_path, _ = QFileDialog.getSaveFileName(self.view, "Save Figure", "seismic_plot.pdf", "PDF Documents (*.pdf);;PNG Images (*.png)")
         if not file_path: return
+        
         try:
-            w = self.view.spin_fig_width.value(); h = self.view.spin_fig_height.value()
+            w = self.view.spin_fig_width.value()
+            h = self.view.spin_fig_height.value()
+            
             fig, ax = plt.subplots(figsize=(w, h))
+            
             p = self.view.spin_contrast.value()
-            clip_val = np.percentile(np.abs(self.current_data), p) if self.current_data.size > 0 else 1.0
+            if self.current_data.size > 0:
+                clip_val = np.percentile(np.abs(self.current_data), p)
+            else:
+                clip_val = 1.0
+                
             extent = [self.x_vals[0], self.x_vals[-1], self.t_vals[-1], self.t_vals[0]]
-            im = ax.imshow(self.current_data, cmap=self.view.combo_cmap.currentText(), aspect='auto', extent=extent, vmin=-clip_val, vmax=clip_val, interpolation='lanczos')
+            
+            # 1. Plot Seismic Image
+            im = ax.imshow(self.current_data, 
+                           cmap=self.view.combo_cmap.currentText(), 
+                           aspect='auto', 
+                           extent=extent, 
+                           vmin=-clip_val, 
+                           vmax=clip_val, 
+                           interpolation='lanczos') 
+                           
             if self.view.chk_grid.isChecked():
                 ax.grid(True, alpha=0.3, linestyle='--')
             else:
                 ax.grid(False)
+                
             ax.set_xlabel(self.get_x_label()) 
-            ylabel = "TWT (ms)" if self.view.combo_domain.currentText() == "Time" else "Depth (m)"; ax.set_ylabel(ylabel)
+            ylabel = "TWT (ms)" if self.view.combo_domain.currentText() == "Time" else "Depth (m)"
+            ax.set_ylabel(ylabel)
+            
+            # Set Limits
             ax.set_xlim(self.view.spin_x_min.value(), self.view.spin_x_max.value())
             ax.set_ylim(self.view.spin_y_max.value(), self.view.spin_y_min.value())
-            if self.view.chk_flip_x.isChecked(): ax.invert_xaxis()
+            
+            if self.view.chk_flip_x.isChecked(): 
+                ax.invert_xaxis()
+                
+            # 2. Draw Horizons with COORDINATE MAPPING
+            # We must map Trace Index -> Current Domain (CDP/Dist) just like the view does
+            
+            # Prepare the mapping array
+            header = self.view.combo_header.currentText()
+            map_array = None
+            if header == "Cumulative Distance":
+                map_array = self.full_cum_dist
+            elif header != "Trace Index" and self.active_header_map is not None:
+                map_array = self.active_header_map
+
             for h in self.horizon_manager.horizons:
                 if h['visible'] and h['points']:
-                    x_d, y_d = zip(*h['points'])
-                    ax.plot(x_d, y_d, color=h['color'], linewidth=1.0)
+                    # Extract stored points (Trace Index, Time)
+                    raw_indices, y_vals = zip(*h['points'])
+                    x_indices = np.array(raw_indices, dtype=int)
+                    y_arr = np.array(y_vals)
+
+                    # --- KEY FIX: Map Indices to Current X-Axis Domain ---
+                    if map_array is not None:
+                        # Clip to ensure we don't crash if index is out of bounds
+                        safe_indices = np.clip(x_indices, 0, len(map_array)-1)
+                        x_plot = map_array[safe_indices]
+                    else:
+                        x_plot = x_indices # Just use trace index
+                    
+                    ax.plot(x_plot, y_arr, color=h['color'], linewidth=1.0)
+                    
             fig.savefig(file_path, dpi=dpi, bbox_inches='tight', metadata={'Creator': 'SeisPlotPy'})
-            plt.close(fig); QMessageBox.information(self.view, "Success", f"Exported to:\n{file_path}")
-        except Exception as e: QMessageBox.critical(self.view, "Export Failed", str(e))
+            plt.close(fig)
+            
+            self.view.update_status(f"Exported: {os.path.basename(file_path)} @ {dpi} DPI")
+            QMessageBox.information(self.view, "Success", f"Exported to:\n{file_path}")
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self.view, "Export Failed", str(e))
     def run_attribute(self, attr_type):
         if self.data_manager is not None:
             # 1. Get current view range from the plot (what the user is looking at)
@@ -1298,3 +1357,4 @@ class MainController:
         except Exception as e:
             from qgis.PyQt.QtWidgets import QMessageBox
             QMessageBox.critical(self.view, "Histogram Error", str(e))
+
