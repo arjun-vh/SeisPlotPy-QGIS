@@ -5,24 +5,20 @@ from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                              QLabel, QRadioButton, QButtonGroup)
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtCore import Qt, pyqtSignal
-
 import pandas as pd
-import numpy as np
-import os
 
 class HorizonManager(QDialog):
-    publish_requested = pyqtSignal(int)
     picking_toggled = pyqtSignal(bool, str)
     horizon_visibility_changed = pyqtSignal()
     horizon_color_changed = pyqtSignal()
     horizon_removed = pyqtSignal()
     export_requested = pyqtSignal(int)
+    publish_requested = pyqtSignal(int) # Signal for "Map" button
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Horizon Interpretation Manager")
-        self.resize(600, 400)
-        
+        self.resize(650, 400) # Slightly wider for new column
         
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         
@@ -41,9 +37,21 @@ class HorizonManager(QDialog):
         
         # Table
         self.table = QTableWidget()
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(["Active", "Name", "Color", "Points", "Actions"])
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        # Increased columns to 6 to add "Vis" (Visibility)
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["Active", "Vis", "Name", "Color", "Points", "Actions"])
+        
+        # Column Resizing
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # Name stretches
+        self.table.setColumnWidth(0, 50) # Active radio
+        self.table.setColumnWidth(1, 40) # Vis checkbox
+        self.table.setColumnWidth(3, 50) # Color
+        self.table.setColumnWidth(4, 60) # Points
+        self.table.setColumnWidth(5, 80) # Actions
+        
+        # --- CRITICAL FIX: Connect item changed signal to save Name edits ---
+        self.table.itemChanged.connect(self.on_item_changed)
+        
         layout.addWidget(self.table)
         
         self.pick_group = QButtonGroup(self)
@@ -87,47 +95,66 @@ class HorizonManager(QDialog):
             self.refresh_table(); self.horizon_visibility_changed.emit()
         except Exception as e: QMessageBox.critical(self, "Error", str(e))
 
+    def on_item_changed(self, item):
+        """Handle edits to table cells (specifically the Name column)."""
+        # Column 2 is Name
+        if item.column() == 2:
+            row = item.row()
+            if row < len(self.horizons):
+                new_name = item.text()
+                self.horizons[row]['name'] = new_name
+                # If currently picking this horizon, update the status label
+                if row == self.active_horizon_index and self.is_picking:
+                     self.lbl_status.setText(f"Status: Picking on {new_name}")
+
     def refresh_table(self):
+        # Block signals to prevent 'on_item_changed' from firing while we build the table
+        self.table.blockSignals(True)
         self.table.setRowCount(len(self.horizons))
-        # Clear old radio buttons from group
+        
         for btn in self.pick_group.buttons(): self.pick_group.removeButton(btn)
         
         for i, h in enumerate(self.horizons):
-            # 1. Active Radio Button
+            # 0. Active Radio Button
             rb = QRadioButton(); rb.setChecked(i == self.active_horizon_index)
             rb.toggled.connect(lambda c, idx=i: self.set_active_horizon(idx) if c else None)
             self.pick_group.addButton(rb)
-            widget_rb = QWidget(); l = QHBoxLayout(widget_rb); l.addWidget(rb); l.setAlignment(Qt.AlignCenter); l.setContentsMargins(0,0,0,0)
-            self.table.setCellWidget(i, 0, widget_rb)
+            w_rb = QWidget(); l = QHBoxLayout(w_rb); l.addWidget(rb); l.setAlignment(Qt.AlignCenter); l.setContentsMargins(0,0,0,0)
+            self.table.setCellWidget(i, 0, w_rb)
             
+            # 1. NEW: Visibility Checkbox
+            chk_vis = QCheckBox()
+            chk_vis.setChecked(h.get('visible', True))
+            # Connect toggle to data update
+            chk_vis.toggled.connect(lambda c, idx=i: self.toggle_horizon_vis(idx, c))
+            w_vis = QWidget(); l2 = QHBoxLayout(w_vis); l2.addWidget(chk_vis); l2.setAlignment(Qt.AlignCenter); l2.setContentsMargins(0,0,0,0)
+            self.table.setCellWidget(i, 1, w_vis)
+
             # 2. Name
-            self.table.setItem(i, 1, QTableWidgetItem(h['name']))
+            self.table.setItem(i, 2, QTableWidgetItem(h['name']))
             
             # 3. Color
             btn_col = QPushButton(); btn_col.setStyleSheet(f"background-color: {h['color']}; border: none;")
             btn_col.clicked.connect(lambda _, idx=i: self.change_color(idx))
-            self.table.setCellWidget(i, 2, btn_col)
+            self.table.setCellWidget(i, 3, btn_col)
             
             # 4. Point Count
             item_pts = QTableWidgetItem(str(len(h['points'])))
             item_pts.setFlags(item_pts.flags() ^ Qt.ItemIsEditable) 
-            self.table.setItem(i, 3, item_pts)
+            self.table.setItem(i, 4, item_pts)
             
-            # 5. Actions (Publish + Delete) - NEW CODE
+            # 5. Actions (Map + Delete)
             action_widget = QWidget()
             action_layout = QHBoxLayout(action_widget)
             action_layout.setContentsMargins(2, 2, 2, 2)
             action_layout.setSpacing(4)
             
-            # Map Button
             btn_map = QPushButton("Map")
             btn_map.setToolTip("Publish horizon as a layer to QGIS Map Canvas")
-            # Greenish style to indicate 'Go' / 'Push'
             btn_map.setStyleSheet("background-color: #e6ffe6; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
             btn_map.setFixedWidth(40)
             btn_map.clicked.connect(lambda _, idx=i: self.publish_requested.emit(idx))
             
-            # Delete Button
             btn_del = QPushButton("X")
             btn_del.setToolTip("Delete Horizon")
             btn_del.setStyleSheet("background-color: #ffcccc; color: red; font-weight: bold; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
@@ -136,9 +163,14 @@ class HorizonManager(QDialog):
             
             action_layout.addWidget(btn_map)
             action_layout.addWidget(btn_del)
-            self.table.setCellWidget(i, 4, action_widget)
+            self.table.setCellWidget(i, 5, action_widget)
             
         self.btn_pick.setEnabled(len(self.horizons) > 0)
+        self.table.blockSignals(False)
+
+    def toggle_horizon_vis(self, index, state):
+        self.horizons[index]['visible'] = state
+        self.horizon_visibility_changed.emit()
 
     def set_active_horizon(self, index):
         self.active_horizon_index = index
@@ -166,7 +198,7 @@ class HorizonManager(QDialog):
         count = len(self.horizons[self.active_horizon_index]['points'])
         item = QTableWidgetItem(str(count))
         item.setFlags(item.flags() ^ Qt.ItemIsEditable)
-        self.table.setItem(self.active_horizon_index, 3, item)
+        self.table.setItem(self.active_horizon_index, 4, item) # Updated col index
         
         self.horizon_visibility_changed.emit()
 
@@ -191,7 +223,7 @@ class HorizonManager(QDialog):
             count = len(points)
             item = QTableWidgetItem(str(count))
             item.setFlags(item.flags() ^ Qt.ItemIsEditable)
-            self.table.setItem(self.active_horizon_index, 3, item)
+            self.table.setItem(self.active_horizon_index, 4, item) # Updated col index
             
             self.horizon_visibility_changed.emit()
 
@@ -208,11 +240,9 @@ class HorizonManager(QDialog):
         else: QMessageBox.warning(self, "Warning", "No horizon selected.")
 
     def get_state(self):
-        """Returns list of horizons for serialization."""
         return self.horizons
 
     def restore_state(self, horizons_data):
-        """Restores horizons from list."""
         if not horizons_data: return
         self.horizons = horizons_data
         self.refresh_table()
