@@ -187,7 +187,14 @@ class MainController:
             self.iface.mapCanvas().refresh()
             
         # Metadata for Persistence
-        layer.setCustomProperty("seisplotpy_path", self.data_manager.file_path)
+        # --- FIX: Store RELATIVE Path ---
+        # Convert absolute path -> relative path (e.g. "./data/line.sgy")
+        rel_path = QgsProject.instance().writePath(self.data_manager.file_path)
+        layer.setCustomProperty("seisplotpy_path", rel_path)
+        # -------------------------------
+        
+        if geom_params:
+             layer.setCustomProperty("seisplotpy_geometry_params", json.dumps(geom_params))
         
         # SAVE GEOMETRY PARAMS (Headers/Scalar used)
         # Consolidate on GeometryDialog format
@@ -208,6 +215,10 @@ class MainController:
                 state = self.get_state()
                 if state:
                     self.qgis_layer.setCustomProperty("seisplotpy_state", json.dumps(state))
+                    # Also update the top-level path property to be relative
+                    # This ensures that if you "Save As" the project elsewhere, the path updates
+                    rel_path = QgsProject.instance().writePath(self.data_manager.file_path)
+                    self.qgis_layer.setCustomProperty("seisplotpy_path", rel_path)
             except: pass
 
     def _transform_mouse_point(self, point):
@@ -401,8 +412,10 @@ class MainController:
     def get_state(self):
         """Returns a dict of current state for QGIS project storage."""
         if not self.data_manager: return None
+        # --- FIX: Save RELATIVE Path ---
+        rel_path = QgsProject.instance().writePath(self.data_manager.file_path)
         state = {
-            "file_path": self.data_manager.file_path,
+            "file_path": rel_path,
             "x_min": self.view.spin_x_min.value(),
             "x_max": self.view.spin_x_max.value(),
             "y_min": self.view.spin_y_min.value(),
@@ -422,7 +435,10 @@ class MainController:
         """Restores state from dict and rebuilds navigation index."""
         if not state: return
         
-        path = state.get("file_path", "")
+        # --- FIX: Read & Resolve Path ---
+        raw_path = state.get("file_path", "")
+        # Convert "./data/line.sgy" -> "D:/data/line.sgy"
+        path = QgsProject.instance().readPath(raw_path)
         if not path or not os.path.exists(path):
             self.view.update_status(f"File not found: {path}"); return
 
@@ -1032,8 +1048,7 @@ class MainController:
                 ax.invert_xaxis()
                 
             # 2. Draw Horizons with COORDINATE MAPPING
-            # We must map Trace Index -> Current Domain (CDP/Dist) just like the view does
-            
+            # We must map Trace Index -> Current Domain 
             # Prepare the mapping array
             header = self.view.combo_header.currentText()
             map_array = None
@@ -1357,4 +1372,3 @@ class MainController:
         except Exception as e:
             from qgis.PyQt.QtWidgets import QMessageBox
             QMessageBox.critical(self.view, "Histogram Error", str(e))
-

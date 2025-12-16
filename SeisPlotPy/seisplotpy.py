@@ -289,7 +289,7 @@ class SeisPlotPy:
     def broadcast_click(self, point):
         """Handle double-click: Open window if clicking a known layer."""
         
-        # 1. Propagate to open windows (Standard behavior)
+        # ... (keep existing lines for propagating to controllers) ...
         for ctrl in self.controllers:
             if hasattr(ctrl, 'handle_map_click'):
                 ctrl.handle_map_click(point)
@@ -299,36 +299,49 @@ class SeisPlotPy:
         
         layers = self.iface.mapCanvas().layers() 
         map_crs = self.iface.mapCanvas().mapSettings().destinationCrs()
-        
-        # Define search tolerance (e.g., 5 pixels) in Map Units
         tol = self.iface.mapCanvas().mapUnitsPerPixel() * 5
 
         for layer in layers:
-            # Only check Vector Layers
             if layer.type() != QgsMapLayer.VectorLayer: continue
             
-            # Check for our plugin's custom property
-            path = layer.customProperty("seisplotpy_path")
-            if not path: continue
+            # --- FIX STARTS HERE ---
+            # 1. Get the stored path string (could be "./Data/line.sgy" OR "E:/Data/line.sgy")
+            raw_path = layer.customProperty("seisplotpy_path")
+            if not raw_path: continue
             
-            # Create the search rectangle in MAP coordinates
+            # 2. Try to resolve it as a relative path first (Standard QGIS behavior)
+            # If raw_path is absolute, readPath() usually just returns it as is.
+            # If raw_path is relative, it joins it with the project folder.
+            resolved_path = QgsProject.instance().readPath(raw_path)
+            
+            # 3. VERIFY & FAIL-SAFE
+            final_path_to_open = None
+            
+            if os.path.exists(resolved_path):
+                # Scenario A: The relative path worked (Best case)
+                final_path_to_open = resolved_path
+            elif os.path.exists(raw_path):
+                # Scenario B: The relative path failed, but the raw string works as an absolute path
+                # (This catches old projects or projects saved with absolute paths)
+                final_path_to_open = raw_path
+            
+            # If neither worked, we can't open the file. Skip this layer.
+            if final_path_to_open is None:
+                print(f"SeisPlotPy: Could not locate file. Tried '{resolved_path}' and '{raw_path}'")
+                continue
+
+            # ... (Rest of the CRS transformation logic remains the same) ...
             search_rect_map = QgsGeometry.fromPointXY(point).buffer(tol, 5).boundingBox()
             
-            # Transform that rectangle to LAYER coordinates if needed
             if layer.crs() != map_crs:
                 try:
                     xform = QgsCoordinateTransform(map_crs, layer.crs(), QgsProject.instance())
                     search_rect_layer = xform.transformBoundingBox(search_rect_map)
-                except Exception as e:
-                    print(f"SeisPlotPy: Transform error for {layer.name()}: {e}")
-                    continue
+                except Exception: continue
             else:
                 search_rect_layer = search_rect_map
             
-            # Query the layer using the Transformed Rectangle
             request = QgsFeatureRequest().setFilterRect(search_rect_layer)
-            
-            # We only need to know if ANY feature was hit
             iterator = layer.getFeatures(request)
             has_feature = False
             for feat in iterator:
@@ -336,8 +349,9 @@ class SeisPlotPy:
                 break 
             
             if has_feature:
-                self.open_layer_window(layer, path)
-                return 
+                # Pass the RESOLVED (Absolute) path to the opener
+                self.open_layer_window(layer, final_path_to_open)
+                return
 
     def open_layer_window(self, layer, path):
         # Check if already open
