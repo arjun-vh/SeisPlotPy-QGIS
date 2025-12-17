@@ -159,6 +159,12 @@ class SeismicView(QMainWindow):
         splitter.addWidget(self.plot_widget)
         self.layout.addWidget(splitter)
 
+        # --- NEW CODE: Enable Status Bar for Coordinates ---
+        self.status_bar = self.statusBar()
+        self.lbl_coords = QLabel("X: - | Y: -")
+        self.lbl_coords.setStyleSheet("font-weight: bold; margin-right: 15px;")
+        self.status_bar.addPermanentWidget(self.lbl_coords) # Adds it to the far right
+
     def update_status(self, message): self.lbl_info.setText(message)
     
     def set_colormap(self, name):
