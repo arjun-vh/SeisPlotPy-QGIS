@@ -98,11 +98,13 @@ class MainController:
         self.horizon_manager.horizon_color_changed.connect(self.draw_horizons)
         self.horizon_manager.horizon_removed.connect(self.draw_horizons)
         
-        # This line was causing the error because the method was missing
         self.horizon_manager.export_requested.connect(self.handle_horizon_export)
         self.horizon_manager.publish_requested.connect(self.publish_horizon_to_map)
         
         self.view.plot_widget.scene().sigMouseClicked.connect(self.on_plot_clicked)
+
+        # --- NEW CONNECTION ---
+        self.view.plot_widget.scene().sigMouseMoved.connect(self.on_mouse_moved)
         
         self.view.show()
 
@@ -1005,10 +1007,15 @@ class MainController:
         dpi, ok = QInputDialog.getInt(self.view, "Export Settings", "DPI (Resolution):", 600, 72, 2400)
         if not ok: return
         
-        file_path, _ = QFileDialog.getSaveFileName(self.view, "Save Figure", "seismic_plot.pdf", "PDF Documents (*.pdf);;PNG Images (*.png)")
+        file_path, _ = QFileDialog.getSaveFileName(self.view, "Save Figure", "seismic_plot.pdf", "PDF Documents (*.pdf);;SVG Images (*.svg);;PNG Images (*.png)")
         if not file_path: return
         
         try:
+            # --- FIX: Enable Editable Text in Vector Software ---
+            import matplotlib
+            matplotlib.rcParams['pdf.fonttype'] = 42
+            matplotlib.rcParams['svg.fonttype'] = 'none' # For SVG exports
+            # ---------------------------------------------------
             w = self.view.spin_fig_width.value()
             h = self.view.spin_fig_height.value()
             
@@ -1253,6 +1260,27 @@ class MainController:
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self.view, "Error", f"Failed to publish horizon: {e}")
+    
+    def on_mouse_moved(self, pos):
+        """Updates the status bar with coordinates under the mouse."""
+        # 1. Check if mouse is within the plot area
+        if self.view.plot_widget.sceneBoundingRect().contains(pos):
+            # 2. Map pixel (screen) -> coordinates (data)
+            mouse_point = self.view.plot_widget.getPlotItem().vb.mapSceneToView(pos)
+            x_val = mouse_point.x()
+            y_val = mouse_point.y()
+            
+            # 3. Format based on domain (Time vs Depth)
+            domain = self.view.combo_domain.currentText()
+            unit = "ms" if domain == "Time" else "m"
+            
+            # 4. Get X-Label (Trace, CDP, or Distance)
+            header = self.view.combo_header.currentText()
+            x_label = "Trace" if header == "Trace Index" else header
+            
+            # 5. Update the label
+            self.view.lbl_coords.setText(f"{x_label}: {x_val:.1f} | {domain}: {y_val:.1f} {unit}")
+    
     def show_amplitude_histogram(self):
         """Display amplitude distribution with percentile clip lines"""
         if self.current_data is None:
