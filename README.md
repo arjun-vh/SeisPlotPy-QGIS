@@ -34,7 +34,16 @@ Tip: Users may also install these using the **QGIS Pip Manager** plugin.
 
 ### 2️⃣ Install SeisPlotPy Plugin
 
-#### Option A — From ZIP 
+#### Option A — Official QGIS Plugin Repository (Recommended)
+This is the easiest way to stay up to date with the latest features. Since SeisPlotPy is currently in active development, you may need to enable experimental versions.
+
+1. Open QGIS and go to Plugins → Manage and Install Plugins...
+2. Click on the Settings tab on the left sidebar.
+3. Check the box that says "Show also experimental plugins".
+4. Switch to the All tab and search for SeisPlotPy.
+5. Select the plugin and click Install Plugin.
+
+#### Option B — From ZIP 
 
 1. Download the latest release ZIP from the repository:
     https://github.com/arjun-vh/SeisPlotPy-QGIS/releases
@@ -42,7 +51,7 @@ Tip: Users may also install these using the **QGIS Pip Manager** plugin.
 3. Select the downloaded file and install
 4. Restart QGIS
 
-#### Option B — Manual Installation
+#### Option C — Manual Installation
 
 Copy the `SeisPlotPy` folder into:
 
