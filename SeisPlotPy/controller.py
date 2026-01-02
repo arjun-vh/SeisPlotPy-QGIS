@@ -200,7 +200,7 @@ class MainController:
         
         # SAVE GEOMETRY PARAMS (Headers/Scalar used)
         # Consolidate on GeometryDialog format
-        import json
+        
         if geom_params:
             layer.setCustomProperty("seisplotpy_geometry_params", json.dumps(geom_params))
         else:
@@ -1400,3 +1400,4 @@ class MainController:
         except Exception as e:
             from qgis.PyQt.QtWidgets import QMessageBox
             QMessageBox.critical(self.view, "Histogram Error", str(e))
+
