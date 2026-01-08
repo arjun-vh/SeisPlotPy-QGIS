@@ -3,19 +3,47 @@ from scipy.signal import butter, filtfilt, hilbert
 
 class SeismicProcessing:
     @staticmethod
-    def apply_scalar(values, scalars):
+    def apply_scalar(values, scalars, coord_units=1):
         if scalars is None: return values.astype(float)
         s = scalars.astype(float); s[s == 0] = 1.0
         res = values.astype(float)
         pos_mask = s > 0; res[pos_mask] *= s[pos_mask]
         neg_mask = s < 0; res[neg_mask] /= np.abs(s[neg_mask])
+
+        if coord_units == 2:
+            res /= 3600.0
+
         return res
 
     @staticmethod
-    def calculate_cumulative_distance(x, y):
-        dx = np.diff(x); dy = np.diff(y)
-        dist = np.sqrt(dx**2 + dy**2)
-        return np.concatenate(([0], np.cumsum(dist)))
+    def calculate_cumulative_distance(x, y, is_geographic=False):
+        """
+        Calculates cumulative distance along a line.
+        If is_geographic is True, uses Haversine formula (input assumed Decimal Degrees).
+        If False, uses Euclidean distance (input assumed Projected Meters/Feet).
+        """
+        if is_geographic:
+            # Vectorized Haversine Formula
+            # Assumes x = Longitude, y = Latitude
+            R = 6371000.0  # Earth radius in meters
+            
+            lon = np.radians(x)
+            lat = np.radians(y)
+            
+            dlon = np.diff(lon)
+            dlat = np.diff(lat)
+            
+            a = np.sin(dlat / 2.0)**2 + np.cos(lat[:-1]) * np.cos(lat[1:]) * np.sin(dlon / 2.0)**2
+            c = 2 * np.arcsin(np.sqrt(a))
+            
+            dist = R * c
+            return np.concatenate(([0], np.cumsum(dist)))
+        else:
+            # Standard Euclidean (Projected)
+            dx = np.diff(x)
+            dy = np.diff(y)
+            dist = np.sqrt(dx**2 + dy**2)
+            return np.concatenate(([0], np.cumsum(dist)))
 
     @staticmethod
     def apply_agc(data, sample_rate_ms, window_ms=500):
