@@ -8,7 +8,7 @@ from qgis.PyQt.QtWidgets import (QApplication, QFileDialog, QMessageBox, QInputD
                              QDoubleSpinBox, QDialog, QDialogButtonBox, 
                              QComboBox, QRadioButton, QButtonGroup, QAction)
 from qgis.PyQt.QtGui import QCursor, QIcon, QColor, QPainter
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtCore import Qt, QVariant, QTimer
 import json
 
 # --- QGIS IMPORTS ---
@@ -21,6 +21,7 @@ from qgis.gui import QgsProjectionSelectionDialog, QgsRubberBand
 
 # --- SPATIAL SEARCH IMPORT ---
 from scipy.spatial import cKDTree
+from scipy.ndimage import zoom
 
 
 import pyqtgraph as pg
@@ -89,6 +90,7 @@ class MainController:
         self.view.chk_flip_x.stateChanged.connect(self.toggle_flip_x)
         self.view.chk_grid.stateChanged.connect(self.toggle_grid)
         self.view.chk_smooth.stateChanged.connect(self.toggle_smooth)
+        self.view.chk_high_res.stateChanged.connect(lambda: self.update_display_only())
         self.view.btn_preview_ratio.clicked.connect(self.match_aspect_ratio)
         self.view.plot_widget.sigRangeChanged.connect(self.sync_view_to_controls)
         self.view.combo_header.activated.connect(self.on_header_changed)
@@ -200,7 +202,6 @@ class MainController:
         
         # SAVE GEOMETRY PARAMS (Headers/Scalar used)
         # Consolidate on GeometryDialog format
-        
         if geom_params:
             layer.setCustomProperty("seisplotpy_geometry_params", json.dumps(geom_params))
         else:
@@ -494,13 +495,13 @@ class MainController:
             if "y_min" in state: self.view.spin_y_min.setValue(float(state["y_min"]))
             if "y_max" in state: self.view.spin_y_max.setValue(float(state["y_max"]))
             
-            # --- Rebuild Navigation Index from Layer Metadata ---
+            # --- Rebuild Navigation Index & Restore Distance ---
             if self.qgis_layer and self.qgis_layer.isValid():
                 # Defaults
                 x_key = "CDP_X"; y_key = "CDP_Y"; use_header = True
                 scalar_key = "Source_Group_Scalar"; manual_val = 1.0
                 
-                # Load saved geometry params
+                # Load saved geometry params from the Layer
                 try:
                     p_json = self.qgis_layer.customProperty("seisplotpy_geometry_params")
                     if p_json:
@@ -512,26 +513,62 @@ class MainController:
                         manual_val = float(p.get("manual_val", manual_val))
                 except Exception: pass
 
-                # Build the Tree
+                # Perform Logic
                 try:
-                    self.coord_step = 10 
-                    raw_x = self.data_manager.get_header_slice(x_key, 0, self.data_manager.n_traces, self.coord_step)
-                    raw_y = self.data_manager.get_header_slice(y_key, 0, self.data_manager.n_traces, self.coord_step)
+                    # 1. Fetch FULL Resolution Coordinates (Step=1)
+                    # We need full resolution to accurately recalculate distance
+                    raw_x = self.data_manager.get_header_slice(x_key, 0, self.data_manager.n_traces, 1)
+                    raw_y = self.data_manager.get_header_slice(y_key, 0, self.data_manager.n_traces, 1)
                     
+                    units = self.data_manager.coordinate_units
+
                     if use_header:
-                        scalars = self.data_manager.get_header_slice(scalar_key, 0, self.data_manager.n_traces, self.coord_step)
-                        cdp_x = SeismicProcessing.apply_scalar(raw_x, scalars)
-                        cdp_y = SeismicProcessing.apply_scalar(raw_y, scalars)
+                        scalars = self.data_manager.get_header_slice(scalar_key, 0, self.data_manager.n_traces, 1)
+                        cdp_x = SeismicProcessing.apply_scalar(raw_x, scalars, coord_units=units)
+                        cdp_y = SeismicProcessing.apply_scalar(raw_y, scalars, coord_units=units)
                     else:
                         cdp_x = raw_x * manual_val
                         cdp_y = raw_y * manual_val
+                        if units == 2:
+                            cdp_x /= 3600.0
+                            cdp_y /= 3600.0
                     
                     if np.any(cdp_x) and np.any(cdp_y):
-                        self.world_coords = np.column_stack((cdp_x, cdp_y))
+                        # 2. Recalculate Cumulative Distance (Persistence Logic)
+                        # Determine if Geographic based on Layer CRS or Units
+                        is_geo = False
+                        if units == 2: 
+                            is_geo = True
+                        elif self.qgis_layer.crs().isValid(): 
+                            is_geo = self.qgis_layer.crs().isGeographic()
+                        
+                        self.full_cum_dist = SeismicProcessing.calculate_cumulative_distance(cdp_x, cdp_y, is_geographic=is_geo)
+                        
+                        # Handle Units (m vs km)
+                        if self.full_cum_dist[-1] > 10000:
+                            self.full_cum_dist /= 1000.0
+                            self.dist_unit = "km"
+                        else:
+                            self.dist_unit = "m"
+
+                        # Update UI to show "Cumulative Distance" option
+                        if self.view.combo_header.findText("Cumulative Distance") == -1:
+                            self.view.combo_header.insertItem(1, "Cumulative Distance")
+                        
+                        # 3. Build Map Navigation Tree (Decimated)
+                        # We decimate the high-res arrays to keep the spatial index fast
+                        nav_step = 10
+                        self.coord_step = nav_step 
+                        
+                        nav_x = cdp_x[::nav_step]
+                        nav_y = cdp_y[::nav_step]
+                        
+                        self.world_coords = np.column_stack((nav_x, nav_y))
                         self.coord_tree = cKDTree(self.world_coords)
-                        self.view.update_status(f"Navigation Index Rebuilt: {len(cdp_x)} points")
+                        self.view.update_status(f"Restored: {len(nav_x)*10} traces")
+                        
                 except Exception as e:
-                    print(f"SeisPlotPy: Error calculating coordinates: {e}")
+                    print(f"SeisPlotPy: Error restoring coordinates: {e}")
 
             elif not self.qgis_layer:
                 # Fallback if no layer exists
@@ -624,26 +661,55 @@ class MainController:
     def calculate_distance(self, settings):
         print("Calculating Cumulative Distance...")
         try:
+            # 1. Retrieve Raw Headers
             raw_x = self.data_manager.get_header_slice(settings['x_key'], 0, self.data_manager.n_traces, 1)
             raw_y = self.data_manager.get_header_slice(settings['y_key'], 0, self.data_manager.n_traces, 1)
+            
+            # --- FIX: Retrieve units ---
+            units = self.data_manager.coordinate_units
+
+            # 2. Apply Scalars (with Unit 2 support)
             if settings['use_header']:
                 scalars = self.data_manager.get_header_slice(settings['scalar_key'], 0, self.data_manager.n_traces, 1)
-                scaled_x = SeismicProcessing.apply_scalar(raw_x, scalars)
-                scaled_y = SeismicProcessing.apply_scalar(raw_y, scalars)
+                scaled_x = SeismicProcessing.apply_scalar(raw_x, scalars, coord_units=units)
+                scaled_y = SeismicProcessing.apply_scalar(raw_y, scalars, coord_units=units)
             else:
                 s = settings['manual_val']
                 scaled_x = raw_x * s
                 scaled_y = raw_y * s
+                
+                # Manual Fallback for Arc Seconds
+                if units == 2:
+                    scaled_x = scaled_x / 3600.0
+                    scaled_y = scaled_y / 3600.0
             
-            # 1. Ask User for CRS
+            # 3. Ask User for CRS
             crs = None
             selector = QgsProjectionSelectionDialog(self.view)
-            selector.setMessage("Select CRS for Coordinates (e.g., UTM Zone)")
+            selector.setMessage("Select CRS for Coordinates (e.g., UTM Zone or WGS84)")
             if selector.exec():
                 crs = selector.crs()
+            else:
+                return # User cancelled
             
-            # 2. Calculate Distance
-            dist = SeismicProcessing.calculate_cumulative_distance(scaled_x, scaled_y)
+            # --- FIX: Warning for Unit/CRS Mismatch ---
+            # If data is Arc Seconds (Geographic) but user picked Projected (Meters), ABORT.
+            if units == 2 and crs is not None and not crs.isGeographic():
+                QMessageBox.warning(self.view, "CRS Mismatch", 
+                    "The trace headers indicate coordinates in Seconds of Arc (Geographic), "
+                    "but you selected a Projected CRS (e.g., UTM).\n\n"
+                    "This would result in incorrect distance calculations.\n"
+                    "Please try again and select a Geographic CRS (e.g., WGS 84).")
+                return
+
+            # 4. Determine Calculation Mode based on CRS
+            is_geo = False
+            if crs is not None and crs.isValid():
+                is_geo = crs.isGeographic()
+            
+            # 5. Calculate Distance
+            dist = SeismicProcessing.calculate_cumulative_distance(scaled_x, scaled_y, is_geographic=is_geo)
+            
             max_dist = dist[-1]
             if max_dist > 10000:
                 dist = dist / 1000.0
@@ -652,7 +718,7 @@ class MainController:
                 self.dist_unit = "m"
             self.full_cum_dist = dist
             
-            # 3. Create Layer with CRS
+            # 6. Create Layer
             self.create_qgis_layer(scaled_x, scaled_y, crs, settings)
 
             if self.view.combo_header.findText("Cumulative Distance") == -1:
@@ -681,7 +747,10 @@ class MainController:
         coord_keys = ['SourceX', 'SourceY', 'GroupX', 'GroupY', 'CDP_X', 'CDP_Y']
         if header_name in coord_keys and 'SourceGroupScalar' in self.data_manager.available_headers:
             scalars = self.data_manager.get_header_slice('SourceGroupScalar', start, end, step)
-            return SeismicProcessing.apply_scalar(raw, scalars)
+            
+            # --- FIX: Pass coordinate units ---
+            units = self.data_manager.coordinate_units
+            return SeismicProcessing.apply_scalar(raw, scalars, coord_units=units)
         return raw
 
     def show_dist_tool(self):
@@ -954,13 +1023,18 @@ class MainController:
             except Exception as e: QMessageBox.critical(self.view, "Processing Error", str(e))
     def reset_processing(self): self.apply_changes(); self.view.update_status("Reset to Raw Data")
     
-    # --- UPDATED: Fixes the Squeezed Display Bug ---
+    def _force_uncheck_high_res(self):
+        # Safely unchecks the High Res box without triggering loops
+        self.view.chk_high_res.blockSignals(True)
+        self.view.chk_high_res.setChecked(False)
+        self.view.chk_high_res.blockSignals(False)
+
     def update_display_only(self):
         if self.current_data is None: return
         
-        # 1. Determine correct X bounds from data, NOT spinboxes
-        # The spinboxes contain the VIEW limits (e.g. 1000-2000), 
-        # but the data might be traces 1002-1998 (due to integer snapping)
+        # 1. Determine correct X bounds from data
+        # We prefer the calculated values (from header) over the spinbox values
+        # because spinboxes might be rounded.
         if hasattr(self, 'x_vals') and self.x_vals is not None and self.x_vals.size > 0:
             x_min = self.x_vals[0]
             x_max = self.x_vals[-1]
@@ -968,9 +1042,7 @@ class MainController:
             x_min = self.view.spin_x_min.value()
             x_max = self.view.spin_x_max.value()
             
-        # 2. Determine correct Y bounds from data
-        # Data is always full time range, so we must use the full time range for the Image Rect
-        # otherwise we squash 5 seconds of data into a 1 second view box
+        # 2. Determine correct Y bounds
         if hasattr(self, 't_vals') and self.t_vals is not None:
             y_min = self.t_vals[0]
             y_max = self.t_vals[-1]
@@ -978,10 +1050,30 @@ class MainController:
             y_min = self.view.spin_y_min.value()
             y_max = self.view.spin_y_max.value()
         
-        # 3. Display with DATA bounds
-        self.view.display_seismic(self.current_data.T, x_range=(x_min, x_max), y_range=(y_min, y_max))
-        self.update_contrast(); self.draw_horizons()
-    # -----------------------------------------------
+        # --- NEW LOGIC: High Res Interpolation ---
+        data_to_plot = self.current_data
+        
+        # Only interpolate if the user explicitly requested it
+        if self.view.chk_high_res.isChecked():
+            try:
+                # Safety Limit: Prevent freezing on massive datasets (> 10 million samples)
+                if data_to_plot.size < 10000000: 
+                     # Zoom 1x on Time (Axis 0), 4x on Traces (Axis 1)
+                     # order = 3 (Cubic), mode='nearest'
+                     data_to_plot = zoom(data_to_plot, (1, 4), order=3, mode='nearest')
+                else:
+                     self.view.update_status("Data too large for High-Res mode.")
+                     QTimer.singleShot(0, self._force_uncheck_high_res)
+            except Exception as e:
+                print(f"Interpolation error: {e}")
+        # -----------------------------------------
+
+        # 3. Display Data
+        # The ImageItem automatically stretches the array to fit the provided x_range/y_range.
+        # This ensures the physical coordinates remain exact even though the array is 4x wider.
+        self.view.display_seismic(data_to_plot.T, x_range=(x_min, x_max), y_range=(y_min, y_max))
+        self.update_contrast()
+        self.draw_horizons()
 
     def match_aspect_ratio(self):
         try:
@@ -994,11 +1086,16 @@ class MainController:
     def update_contrast(self):
         if self.current_data is None: return
         try:
+            # 1. Calculate the new levels based on the raw data statistics
             p = self.view.spin_contrast.value()
-            if self.current_data.size > 0: clip_val = np.percentile(np.abs(self.current_data), p)
-            else: clip_val = 1.0
-            self.view.img_item.setImage(self.current_data.T, levels=[-clip_val, clip_val], autoLevels=False)
-        except Exception: pass
+            if self.current_data.size > 0: 
+                clip_val = np.percentile(np.abs(self.current_data), p)
+            else: 
+                clip_val = 1.0
+            self.view.img_item.setLevels([-clip_val, clip_val])
+            
+        except Exception as e:
+            print(f"Contrast update error: {e}")
     def export_figure(self):
         if self.current_data is None: 
             QMessageBox.warning(self.view, "Warning", "No data to export.")
@@ -1071,7 +1168,7 @@ class MainController:
                     x_indices = np.array(raw_indices, dtype=int)
                     y_arr = np.array(y_vals)
 
-                    # --- KEY FIX: Map Indices to Current X-Axis Domain ---
+                    # ---FIX: Map Indices to Current X-Axis Domain ---
                     if map_array is not None:
                         # Clip to ensure we don't crash if index is out of bounds
                         safe_indices = np.clip(x_indices, 0, len(map_array)-1)
@@ -1278,8 +1375,29 @@ class MainController:
             header = self.view.combo_header.currentText()
             x_label = "Trace" if header == "Trace Index" else header
             
-            # 5. Update the label
-            self.view.lbl_coords.setText(f"{x_label}: {x_val:.1f} | {domain}: {y_val:.1f} {unit}")
+            # 5.  Lookup World Coordinates 
+            world_str = ""
+            try:
+                # Determine Trace Index from the current X-axis value
+                t_idx = -1
+                if header == "Trace Index":
+                    t_idx = int(round(x_val))
+                elif self.active_header_map is not None and self.active_header_map.size > 0:
+                    # Find closest trace index for this X value (e.g. Distance -> Trace)
+                    t_idx = (np.abs(self.active_header_map - x_val)).argmin()
+                
+                # Retrieve World Coords if valid
+                if t_idx >= 0 and self.world_coords is not None:
+                    # Adjust for spatial index decimation (coord_step)
+                    wc_idx = int(t_idx / self.coord_step)
+                    if 0 <= wc_idx < len(self.world_coords):
+                        wx, wy = self.world_coords[wc_idx]
+                        # Format coords (adjust precision as needed)
+                        world_str = f" | CRS coords: {wx:.3f}, {wy:.3f}"
+            except Exception: pass
+            
+            # 6. Update the label
+            self.view.lbl_coords.setText(f"{x_label}: {x_val:.1f} | {domain}: {y_val:.1f} {unit}{world_str}")
     
     def show_amplitude_histogram(self):
         """Display amplitude distribution with percentile clip lines"""
@@ -1400,4 +1518,3 @@ class MainController:
         except Exception as e:
             from qgis.PyQt.QtWidgets import QMessageBox
             QMessageBox.critical(self.view, "Histogram Error", str(e))
-
