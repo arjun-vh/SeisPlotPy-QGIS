@@ -12,6 +12,9 @@ class SeismicDataManager:
         self.sample_rate = 0
         self.time_axis = None
         self.available_headers = []
+
+        #Fix for geographic coordinates
+        self.coordinate_units = 1 # Default to 1 (Length/Meters)
         
         # Fallback state
         self._use_fallback = False
@@ -51,6 +54,11 @@ class SeismicDataManager:
                 self.n_samples = f.samples.size
                 self.sample_rate = segyio.tools.dt(f) / 1000 
                 self.time_axis = f.samples
+
+                # --- Fix: Read Coordinate Units from 1st trace ---
+                if 'CoordinateUnits' in segyio.tracefield.keys:
+                    self.coordinate_units = f.header[0][segyio.tracefield.keys['CoordinateUnits']]
+
                 if segyio.tracefield.keys:
                     self.available_headers = list(segyio.tracefield.keys.keys())
                 self._use_fallback = False
@@ -100,6 +108,11 @@ class SeismicDataManager:
             dt_bytes = f.read(2)
             dt_us = struct.unpack(f'{self._endian}H', dt_bytes)[0]
             self.sample_rate = dt_us / 1000.0
+
+            # Fix: Geographic Coordinates
+            f.seek(3600 + 88)
+            unit_bytes = f.read(2)
+            self.coordinate_units = struct.unpack(f'{self._endian}h', unit_bytes)[0]
 
         # 3. Calculate Trace Count based on File Size
         trace_block_size = 240 + self.n_samples * 4
