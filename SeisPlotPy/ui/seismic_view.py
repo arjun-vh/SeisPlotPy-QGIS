@@ -96,6 +96,12 @@ class SeismicView(QMainWindow):
         toggle_layout.addWidget(self.chk_flip_x)
         toggle_layout.addWidget(self.chk_grid)
         toggle_layout.addWidget(self.chk_smooth)
+
+        # --- High Res Checkbox ---
+        self.chk_high_res = QCheckBox("High Res")
+        self.chk_high_res.setToolTip("Interpolate data (4x) for vector-like display. (CPU Intensive)")
+        toggle_layout.addWidget(self.chk_high_res)
+
         self.sidebar_layout.addLayout(toggle_layout)
         
         self.sidebar_layout.addWidget(QLabel("Colormap:"))
