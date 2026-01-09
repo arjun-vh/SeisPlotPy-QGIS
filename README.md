@@ -115,8 +115,6 @@ https://github.com/arjun-vh/SeisPlotPy-QGIS/issues
 
 If you use SeisPlotPy in your research, reports, or professional work, please acknowledge the software using the following citation:
 
-#### APA Style:
-
 Arjun, V.H. (2025). arjun-vh/SeisPlotPy-QGIS: SeisPlotPy QGIS Plugin v0.9.5. Zenodo. https://doi.org/10.5281/zenodo.17960132
 
 
