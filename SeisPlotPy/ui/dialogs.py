@@ -3,15 +3,49 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QLabel, QDoubleSpinBox,
                              QButtonGroup, QHBoxLayout)
 
 class BandpassDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, nyquist=None):
         super().__init__(parent)
+
         self.setWindowTitle("Bandpass Filter")
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Low Cut (Hz):")); self.spin_low = QDoubleSpinBox(); self.spin_low.setRange(1, 200); self.spin_low.setValue(8); layout.addWidget(self.spin_low)
-        layout.addWidget(QLabel("High Cut (Hz):")); self.spin_high = QDoubleSpinBox(); self.spin_high.setRange(5, 500); self.spin_high.setValue(60); layout.addWidget(self.spin_high)
+
+        # -------------------------------
+        # Determine maximum allowed frequency
+        # -------------------------------
+        if nyquist is not None:
+            max_freq = 0.9 * nyquist
+        else:
+            max_freq = 20000  # safe fallback
+
+        # -------------------------------
+        # Low cut
+        # -------------------------------
+        layout.addWidget(QLabel("Low Cut (Hz):"))
+        self.spin_low = QDoubleSpinBox()
+        self.spin_low.setRange(1, max_freq)
+        self.spin_low.setValue(min(8, max_freq))
+        layout.addWidget(self.spin_low)
+
+        # -------------------------------
+        # High cut
+        # -------------------------------
+        layout.addWidget(QLabel("High Cut (Hz):"))
+        self.spin_high = QDoubleSpinBox()
+        self.spin_high.setRange(5, max_freq)
+        self.spin_high.setValue(min(60, max_freq))
+        layout.addWidget(self.spin_high)
+
+        # -------------------------------
+        # Buttons
+        # -------------------------------
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(self.accept); buttons.rejected.connect(self.reject); layout.addWidget(buttons)
-    def get_values(self): return self.spin_low.value(), self.spin_high.value()
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_values(self):
+        return self.spin_low.value(), self.spin_high.value()
+
 
 class GeometryDialog(QDialog):
     def __init__(self, headers, parent=None):
