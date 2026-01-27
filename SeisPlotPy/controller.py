@@ -1015,12 +1015,26 @@ class MainController:
         try: self.current_data = SeismicProcessing.apply_agc(self.current_data, self.data_manager.sample_rate, window); self.update_display_only(); self.view.update_status("Applied AGC")
         except Exception as e: QMessageBox.critical(self.view, "Processing Error", str(e))
     def run_filter(self):
-        if self.current_data is None: return
-        dlg = BandpassDialog(self.view)
+        if self.current_data is None:
+            return
+        dt_ms = self.data_manager.sample_rate  # sample interval in ms
+        nyquist = 0.5 * (1000.0 / dt_ms)
+        dlg = BandpassDialog(self.view, nyquist)
+
         if dlg.exec():
             low, high = dlg.get_values()
-            try: self.current_data = SeismicProcessing.apply_bandpass(self.current_data, self.data_manager.sample_rate, low, high); self.update_display_only(); self.view.update_status(f"Applied Bandpass {low}-{high} Hz")
-            except Exception as e: QMessageBox.critical(self.view, "Processing Error", str(e))
+            try:
+                self.current_data = SeismicProcessing.apply_bandpass(
+                    self.current_data,
+                    self.data_manager.sample_rate,
+                    low,
+                    high
+                )
+                self.update_display_only()
+                self.view.update_status(f"Applied Bandpass {low}-{high} Hz")
+            except Exception as e:
+                QMessageBox.critical(self.view, "Processing Error", str(e))
+
     def reset_processing(self): self.apply_changes(); self.view.update_status("Reset to Raw Data")
     
     def _force_uncheck_high_res(self):
