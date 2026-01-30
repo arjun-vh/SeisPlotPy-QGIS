@@ -31,6 +31,8 @@ from .ui.seismic_view import SeismicView
 from .ui.header_tools import TextHeaderDialog, HeaderQCPlot, SpectrumPlot, HeaderExportDialog
 from .ui.horizon_manager import HorizonManager
 from .ui.dialogs import GeometryDialog, BandpassDialog
+from .ui.header_tools import HeaderExplorer
+from .ui.dialogs import ExportSubsetDialog
 from .core.data_handler import SeismicDataManager
 from .core.processing import SeismicProcessing
 
@@ -116,6 +118,9 @@ class MainController:
     def cleanup_on_close(self, event):
         """Called when the user closes the Seismic Window."""
         self.save_horizons() # Ensure saved
+        
+        if hasattr(self, 'header_explorer') and self.header_explorer:
+            self.header_explorer.close()
         
         # Ensure latest state is on the layer
         self.update_layer_state()
@@ -458,7 +463,7 @@ class MainController:
             self.action_text_header.setEnabled(True); self.action_header_qc.setEnabled(True)
             self.action_agc.setEnabled(True); self.action_filter.setEnabled(True)
             self.action_reset.setEnabled(True); self.action_spectrum.setEnabled(True)
-            self.action_dist.setEnabled(True); self.action_histogram.setEnabled(True)
+            self.action_dist.setEnabled(True); self.action_header_explorer.setEnabled(True); self.action_export.setEnabled(True); self.action_histogram.setEnabled(True)
             self.act_env.setEnabled(True); self.act_phase.setEnabled(True)
             self.act_cos.setEnabled(True); self.act_freq.setEnabled(True)
             self.act_rms.setEnabled(True)
@@ -810,6 +815,8 @@ class MainController:
                 self.action_load_menu.setEnabled(False)
                 
             self.action_histogram.setEnabled(True)
+            self.action_header_explorer.setEnabled(True)
+            self.action_export.setEnabled(True)
             
         except Exception as e:
             self.view.update_status("Load failed.")
@@ -848,7 +855,10 @@ class MainController:
             self.view.btn_load.setEnabled(False)
             self.view.btn_load.setText(f"Linked: {os.path.basename(path)}")
             if hasattr(self, 'action_load_menu'): self.action_load_menu.setEnabled(False)
+            self.action_header_explorer.setEnabled(True)
+            self.action_export.setEnabled(True)
             self.action_histogram.setEnabled(True)
+            
         except Exception as e:
             self.view.update_status("Load failed.")
             print(f"Load failed: {e}")
@@ -996,6 +1006,17 @@ class MainController:
         proc_menu = menu_bar.addMenu("Processing"); self.action_agc = QAction("Apply AGC", self.view); self.action_agc.triggered.connect(self.run_agc); self.action_agc.setEnabled(False); proc_menu.addAction(self.action_agc); self.action_filter = QAction("Bandpass Filter", self.view); self.action_filter.triggered.connect(self.run_filter); self.action_filter.setEnabled(False); proc_menu.addAction(self.action_filter); proc_menu.addSeparator(); self.action_reset = QAction("Reset to Raw Data", self.view); self.action_reset.triggered.connect(self.reset_processing); self.action_reset.setEnabled(False); proc_menu.addAction(self.action_reset)
         attr_menu = menu_bar.addMenu("Attributes"); self.act_env = QAction("Instantaneous Amplitude (Envelope)", self.view); self.act_env.triggered.connect(lambda: self.run_attribute("Envelope")); self.act_env.setEnabled(False); attr_menu.addAction(self.act_env); self.act_phase = QAction("Instantaneous Phase", self.view); self.act_phase.triggered.connect(lambda: self.run_attribute("Phase")); self.act_phase.setEnabled(False); attr_menu.addAction(self.act_phase); self.act_cos = QAction("Cosine of Phase", self.view); self.act_cos.triggered.connect(lambda: self.run_attribute("Cosine Phase")); self.act_cos.setEnabled(False); attr_menu.addAction(self.act_cos); self.act_freq = QAction("Instantaneous Frequency", self.view); self.act_freq.triggered.connect(lambda: self.run_attribute("Frequency")); self.act_freq.setEnabled(False); attr_menu.addAction(self.act_freq); attr_menu.addSeparator(); self.act_rms = QAction("RMS Amplitude", self.view); self.act_rms.triggered.connect(lambda: self.run_attribute("RMS")); self.act_rms.setEnabled(False); attr_menu.addAction(self.act_rms)
         tools_menu = menu_bar.addMenu("Tools"); self.action_dist = QAction("Setup Geometry / Distance", self.view); self.action_dist.triggered.connect(self.show_dist_tool); self.action_dist.setEnabled(False); tools_menu.addAction(self.action_dist); self.action_horizons = QAction("Horizon Manager & Picking", self.view); self.action_horizons.triggered.connect(lambda: self.horizon_manager.show()); tools_menu.addAction(self.action_horizons); self.action_text_header = QAction("View Text Header", self.view); self.action_text_header.triggered.connect(self.show_text_header); self.action_text_header.setEnabled(False); tools_menu.addAction(self.action_text_header); self.action_header_qc = QAction("Trace Header QC Plot", self.view); self.action_header_qc.triggered.connect(self.show_header_qc); self.action_header_qc.setEnabled(False); tools_menu.addAction(self.action_header_qc); self.action_spectrum = QAction("Frequency Spectrum", self.view); self.action_spectrum.triggered.connect(self.show_spectrum); self.action_spectrum.setEnabled(False); tools_menu.addAction(self.action_spectrum)
+        
+        # New Header Explorer Action
+        self.action_header_explorer = QAction("Header Explorer (Binary/Trace)", self.view); self.action_header_explorer.triggered.connect(self.show_header_explorer); self.action_header_explorer.setEnabled(False); tools_menu.addAction(self.action_header_explorer)
+        
+        self.action_export = QAction("Export SEG-Y Subset...", self.iface.mainWindow())
+        self.action_export.triggered.connect(self.export_data)
+        self.action_export.setEnabled(False) # Start disabled
+        
+        # Add it to the menu
+        file_menu.addAction(self.action_export)
+        
         self.action_histogram = QAction("View Amplitude Histogram", self.view)
         self.action_histogram.triggered.connect(self.show_amplitude_histogram)
         self.action_histogram.setEnabled(False)
@@ -1412,6 +1433,42 @@ class MainController:
             
             # 6. Update the label
             self.view.lbl_coords.setText(f"{x_label}: {x_val:.1f} | {domain}: {y_val:.1f} {unit}{world_str}")
+    
+    def show_header_explorer(self):
+        if not self.data_manager:
+            return
+        from .ui.header_tools import HeaderExplorer
+        self.header_explorer = HeaderExplorer(self.data_manager, self.view)
+        self.header_explorer.show()
+    
+    def export_data(self):
+        """Opens the export dialog and handles the file creation."""
+        # Safety check: Is a file actually loaded?
+        if not self.data_manager or not self.data_manager.file_path:
+            self.view.show_message("No Data", "Please load a SEG-Y file first.", level="warning")
+            return
+
+        # Open the dialog we created in Step 2
+        # We pass the total trace count so the spinner limits are correct
+        dlg = ExportSubsetDialog(self.data_manager.n_traces, self.view)
+        
+        # If the user clicks "OK" (Accepted)
+        if dlg.exec_() == QDialog.Accepted:
+            # 1. Get the inputs from the dialog
+            out_path, start, end = dlg.get_inputs()
+            
+            # 2. Show a status message
+            self.view.show_message("Exporting", "Writing new SEG-Y file... Please wait.", level="info")
+            QApplication.processEvents() # Keeps the UI responsive
+            
+            # 3. Call the engine we built in Step 1
+            success, msg = self.data_manager.export_segy_subset(out_path, start, end)
+            
+            # 4. Report back
+            if success:
+                self.view.show_message("Success", f"Export complete!\nSaved to: {out_path}", level="info")
+            else:
+                self.view.show_message("Error", msg, level="critical")
     
     def show_amplitude_histogram(self):
         """Display amplitude distribution with percentile clip lines"""
