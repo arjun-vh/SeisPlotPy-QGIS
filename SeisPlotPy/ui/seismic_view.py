@@ -194,3 +194,15 @@ class SeismicView(QMainWindow):
             height = y_max - y_min
             self.img_item.setRect(QRectF(x_min, y_min, width, height))
         self.set_colormap(self.combo_cmap.currentText())
+
+    def show_message(self, title, message, level="info"):
+        """Displays a message box with the specified level."""
+        from qgis.PyQt.QtWidgets import QMessageBox
+        if level == "info":
+            QMessageBox.information(self, title, message)
+        elif level == "warning":
+            QMessageBox.warning(self, title, message)
+        elif level == "critical":
+            QMessageBox.critical(self, title, message)
+        else:
+            QMessageBox.information(self, title, message)
