@@ -31,16 +31,35 @@ class SeismicDataManager:
             'EnergySourcePoint': 16,
             'CDP': 20,
             'TraceIdentificationCode': 28,
+            'NSummedTraces': 30,
+            'NStackedTraces': 32,
+            'DataUse': 34,
+            'DistanceFromSourceToReceiver': 36,
+            'ReceiverGroupElevation': 40,
+            'SurfaceElevationAtSource': 44,
+            'SourceDepthAtSurface': 48,
+            'DatumElevationAtReceiver': 52,
+            'DatumElevationAtSource': 56,
+            'WaterDepthAtSource': 60,
+            'WaterDepthAtGroup': 64,
+            'SourceGroupScalar': 70,
+            'ElevationScalar': 68,
             'SourceX': 72,
             'SourceY': 76,
             'GroupX': 80,
             'GroupY': 84,
             'CoordinateUnits': 88,
+            'WeatheringVelocity': 90,
+            'SubWeatheringVelocity': 92,
+            'SourceUpholeTime': 94,
+            'GroupUpholeTime': 96,
+            'DelayRecordingTime': 108,
+            'SamplesPerTrace': 114,
+            'SampleInterval': 116,
             'CDP_X': 180,
             'CDP_Y': 184,
             'Inline': 188,
-            'Crossline': 192,
-            'SourceGroupScalar': 70
+            'Crossline': 192
         }
 
         self._scan_file()
@@ -195,7 +214,7 @@ class SeismicDataManager:
             view_u8 = np.frombuffer(headers_raw.tobytes(), dtype=np.uint8)
             view_2d = view_u8.reshape((len(headers_raw), 240))
             cols = view_2d[:, offset:offset+byte_len]
-            final_type = f'{self._endian}{dtype_code}2' if is_short else f'{self._endian}{dtype_code}4'
+            final_type = f'{self._endian}i2' if is_short else f'{self._endian}i4'
             values = np.frombuffer(cols.tobytes(), dtype=final_type)
             
             return values
@@ -226,3 +245,128 @@ class SeismicDataManager:
                 
         except Exception as e:
             return f"Error reading text header: {e}"
+    
+    def get_binary_header(self):
+        """Retrieves the 400-byte Binary File Header with full spec compliance."""
+        binary_values = {}
+        
+        # Corrected field map with proper 0-indexed byte offsets
+        field_map = {
+            'Job ID Number': (segyio.BinField.JobID, 0, 'i'),
+            'Line Number': (segyio.BinField.LineNumber, 4, 'i'),
+            'Reel Number': (segyio.BinField.ReelNumber, 8, 'i'),
+            'Traces per Ensemble': (segyio.BinField.Traces, 12, 'h'),
+            'Aux Traces per Ensemble': (segyio.BinField.AuxTraces, 14, 'h'),
+            'Sample Interval (us)': (segyio.BinField.Interval, 16, 'h'),
+            'Sample Interval Original (us)': (segyio.BinField.IntervalOriginal, 18, 'h'),
+            'Samples per Trace': (segyio.BinField.Samples, 20, 'h'),
+            'Samples per Trace Original': (segyio.BinField.SamplesOriginal, 22, 'h'),
+            'Data Sample Format Code': (segyio.BinField.Format, 24, 'h'),
+            'Ensemble Fold': (segyio.BinField.EnsembleFold, 26, 'h'),
+            'Trace Sorting Code': (segyio.BinField.SortingCode, 28, 'h'),
+            'Vertical Sum Code': (segyio.BinField.VerticalSum, 30, 'h'),
+            'Sweep Frequency Start (Hz)': (segyio.BinField.SweepFrequencyStart, 32, 'h'),
+            'Sweep Frequency End (Hz)': (segyio.BinField.SweepFrequencyEnd, 34, 'h'),
+            'Sweep Length (ms)': (segyio.BinField.SweepLength, 36, 'h'),
+            'Sweep Type Code': (segyio.BinField.Sweep, 38, 'h'),
+            'Sweep Channel': (segyio.BinField.SweepChannel, 40, 'h'),
+            'Sweep Taper Start (ms)': (segyio.BinField.SweepTaperStart, 42, 'h'),
+            'Sweep Taper End (ms)': (segyio.BinField.SweepTaperEnd, 44, 'h'),
+            'Taper Type Code': (segyio.BinField.Taper, 46, 'h'),
+            'Binary Gain Recovery Flag': (segyio.BinField.BinaryGainRecovery, 48, 'h'),
+            'Amplitude Recovery Code': (segyio.BinField.AmplitudeRecovery, 50, 'h'),
+            'Measurement System': (segyio.BinField.MeasurementSystem, 54, 'h'),
+            'Impulse Signal Polarity': (segyio.BinField.ImpulseSignalPolarity, 56, 'h'),
+            'Vibratory Polarity': (segyio.BinField.VibratoryPolarity, 58, 'h'),
+            # Extended fields (Rev 2.0) - 4-byte integers
+            'Ext Traces': (segyio.BinField.ExtTraces, 60, 'i'),
+            'Ext Aux Traces': (segyio.BinField.ExtAuxTraces, 64, 'i'),
+            'Ext Samples': (segyio.BinField.ExtSamples, 68, 'i'),
+            'Ext Samples Original': (segyio.BinField.ExtSamplesOriginal, 88, 'i'),
+            'Ext Ensemble Fold': (segyio.BinField.ExtEnsembleFold, 92, 'i'),
+            # Revision and Flags
+            'SEG-Y Revision Number': (segyio.BinField.SEGYRevision, 300, 'h'),
+            'SEG-Y Revision Minor': (segyio.BinField.SEGYRevisionMinor, 302, 'h'),
+            'Fixed Length Trace Flag': (segyio.BinField.TraceFlag, 304, 'h'),
+            'Extended Text Header Count': (segyio.BinField.ExtendedHeaders, 306, 'h'),
+        }
+
+        try:
+            if not self._use_fallback:
+                # Use segyio for standard files
+                with segyio.open(self.file_path, mode='r', ignore_geometry=True) as f:
+                    for name, (enum_key, _, _) in field_map.items():
+                        try:
+                            binary_values[name] = int(f.bin[enum_key])
+                        except:
+                            binary_values[name] = 0
+            else:
+                # Manual binary interpretation for non-standard files
+                with open(self.file_path, 'rb') as f:
+                    f.seek(3200)
+                    raw_bin = f.read(400)
+                    if len(raw_bin) < 400: 
+                        return {}
+
+                    # Detect endianness from Revision (bytes 300-301 of binary header)
+                    rev_val = struct.unpack_from(">h", raw_bin, 300)[0]
+                    endian = ">" if (0 <= rev_val <= 10) else "<"
+
+                    for name, (_, offset, fmt) in field_map.items():
+                        try:
+                            val = struct.unpack_from(f"{endian}{fmt}", raw_bin, offset)[0]
+                            binary_values[name] = int(val)
+                        except:
+                            binary_values[name] = 0
+                            
+        except Exception as e:
+            print(f"CRITICAL: Binary Header Load Failed: {e}")
+            
+        return binary_values
+    
+    def export_segy_subset(self, output_path, start_trace, end_trace):
+        """
+        Creates a new SEG-Y file containing only the traces from start_trace to end_trace.
+        """
+        try:
+            # Open the original file to read from it
+            with segyio.open(self.file_path, 'r', ignore_geometry=True) as src:
+                
+                # 1. Create a 'spec' (a blueprint) for the new file
+                # We copy the blueprint from the source file so the format matches exactly
+                spec = segyio.spec()
+                spec.sorting = src.sorting
+                spec.format = src.format
+                spec.samples = src.samples
+                spec.tracecount = (end_trace - start_trace) + 1 # Calculate new file size
+                
+                # 2. Create the new file using that blueprint
+                with segyio.create(output_path, spec) as dst:
+                    
+                    # Copy the Text Header (the big EBCDIC block)
+                    dst.text[0] = src.text[0]
+                    
+                    # Copy the Binary Header (the 400-byte block)
+                    dst.bin = src.bin
+                    
+                    # 3. Copy the Traces and their Headers one by one
+                    # We loop from 'start' to 'end'
+                    dst_idx = 0
+                    for src_idx in range(start_trace, end_trace + 1):
+                        # Copy the header row
+                        dst.header[dst_idx] = src.header[src_idx]
+                        
+                        # --- FIX: Reset the Trace Sequence Number for the new file ---
+                        # TraceSequenceFile is byte 5-8. Key in segyio is 5.
+                        # We use the integer 5 directly to avoid AttributeErrors with different segyio versions.
+                        dst.header[dst_idx][5] = dst_idx + 1
+                        
+                        # Copy the trace data (wiggle values)
+                        dst.trace[dst_idx] = src.trace[src_idx]
+                        
+                        dst_idx += 1
+                        
+            return True, "Export successful."
+            
+        except Exception as e:
+            return False, f"Export failed: {str(e)}"
