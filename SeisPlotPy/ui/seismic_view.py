@@ -85,22 +85,26 @@ class SeismicView(QMainWindow):
         self.sidebar_layout.addWidget(self.combo_domain)
         
         # Toggle Layout (Flip, Grid, Smooth)
-        toggle_layout = QHBoxLayout()
+        # Toggle Layout (Flip, Grid, Smooth, High Res)
+        from qgis.PyQt.QtWidgets import QGridLayout
+        toggle_layout = QGridLayout()
+        
         self.chk_flip_x = QCheckBox("Flip X")
         self.chk_grid = QCheckBox("Grid"); self.chk_grid.setChecked(True)
         
-        # --- NEW SMOOTH BUTTON ---
         self.chk_smooth = QCheckBox("Smooth")
         self.chk_smooth.setToolTip("Enable bilinear interpolation (anti-aliasing)")
-        
-        toggle_layout.addWidget(self.chk_flip_x)
-        toggle_layout.addWidget(self.chk_grid)
-        toggle_layout.addWidget(self.chk_smooth)
 
-        # --- High Res Checkbox ---
         self.chk_high_res = QCheckBox("High Res")
         self.chk_high_res.setToolTip("Interpolate data (4x) for vector-like display. (CPU Intensive)")
-        toggle_layout.addWidget(self.chk_high_res)
+
+        # Row 0
+        toggle_layout.addWidget(self.chk_flip_x, 0, 0)
+        toggle_layout.addWidget(self.chk_grid, 0, 1)
+        
+        # Row 1
+        toggle_layout.addWidget(self.chk_smooth, 1, 0)
+        toggle_layout.addWidget(self.chk_high_res, 1, 1)
 
         self.sidebar_layout.addLayout(toggle_layout)
         
