@@ -185,10 +185,17 @@ class SeisPlotPy:
             if not path: continue
             
             state_json = layer.customProperty("seisplotpy_state")
+            # --- FIX: Save Dual Paths ---
+            path_rel = layer.customProperty("seisplotpy_path_relative")
+            path_abs = layer.customProperty("seisplotpy_path_absolute")
+            # ----------------------------
             
             # Create Node
             layer_node = doc.createElement("NavLayer")
             layer_node.setAttribute("path", str(path))
+            if path_rel: layer_node.setAttribute("path_relative", str(path_rel))
+            if path_abs: layer_node.setAttribute("path_absolute", str(path_abs))
+            
             if state_json:
                 layer_node.setAttribute("state", str(state_json))
             
@@ -209,7 +216,8 @@ class SeisPlotPy:
                     wkt = geom.asWkt()
                     layer_node.setAttribute("wkt", wkt)
                     break 
-            except: pass
+            except Exception as e:
+                print(f"SeisPlotPy Warning [Layer Geometry Save]: {e}")
             
             plugin_node.appendChild(layer_node)
             
@@ -233,10 +241,19 @@ class SeisPlotPy:
             crs_id = layer_node.attribute("crs")
             geom_params = layer_node.attribute("geometry_params")
             
+            # --- FIX: Read Dual Paths ---
+            path_rel = layer_node.attribute("path_relative")
+            path_abs = layer_node.attribute("path_absolute")
+            # ----------------------------
+            
             if path:
+                # Use absolute path name if available for robust matching, or just basename
+                # The layer name in QGIS is typically os.path.basename(path)
                 layer_name = os.path.basename(path)
                 saved_layers[layer_name] = {
                     "path": path, 
+                    "path_rel": path_rel,
+                    "path_abs": path_abs,
                     "state": state, 
                     "wkt": wkt,
                     "crs": crs_id,
@@ -247,13 +264,20 @@ class SeisPlotPy:
         
         # QGIS 3.x auto-restores memory layers, but often loses CRS and Custom Props.
         # We find them by name and patch them up.
-        for layer in QgsProject.instance().mapLayers().values():
+        current_layers = list(QgsProject.instance().mapLayers().values())
+        
+        for layer in current_layers:
             layer_name = layer.name()
             if layer_name in saved_layers:
                 info = saved_layers[layer_name]
                 
                 # 1. Restore Metadata (Link to Plugin)
                 layer.setCustomProperty("seisplotpy_path", info["path"])
+                # --- FIX: Restore Dual Paths ---
+                if info["path_rel"]: layer.setCustomProperty("seisplotpy_path_relative", info["path_rel"])
+                if info["path_abs"]: layer.setCustomProperty("seisplotpy_path_absolute", info["path_abs"])
+                # -------------------------------
+                
                 if info["state"]:
                     layer.setCustomProperty("seisplotpy_state", info["state"])
                 if info["geometry_params"]:
