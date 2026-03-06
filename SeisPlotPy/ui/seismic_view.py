@@ -112,8 +112,9 @@ class SeismicView(QMainWindow):
         self.combo_cmap = QComboBox()
         try:
             all_cmaps = sorted(plt.colormaps())
-        except:
-            all_cmaps = sorted(plt.colormaps())
+        except Exception:
+            # Fallback to common colormap names if API fails
+            all_cmaps = ['viridis', 'seismic', 'gray', 'jet', 'RdBu', 'hot', 'cool']
             
         self.combo_cmap.addItems(all_cmaps)
         self.combo_cmap.setCurrentText("seismic")
@@ -178,8 +179,16 @@ class SeismicView(QMainWindow):
     def update_status(self, message): self.lbl_info.setText(message)
     
     def set_colormap(self, name):
-        try: colormap = cm.get_cmap(name)
-        except: colormap = cm.get_cmap("gray")
+        try:
+            # Modern Matplotlib (3.7+)
+            if hasattr(plt, 'colormaps') and hasattr(plt.colormaps, '__getitem__'):
+                 colormap = plt.colormaps[name]
+            else:
+                 # Legacy
+                 colormap = cm.get_cmap(name)
+        except Exception:
+             colormap = cm.get_cmap("gray")
+             
         lut = (colormap(np.arange(256)) * 255).astype(np.uint8)
         self.img_item.setLookupTable(lut)
     

@@ -7,50 +7,48 @@ from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 import pandas as pd
 
-class HorizonManager(QDialog):
+class FaultManager(QDialog):
     picking_toggled = pyqtSignal(bool, str)
-    horizon_visibility_changed = pyqtSignal()
-    horizon_color_changed = pyqtSignal()
-    horizon_removed = pyqtSignal()
+    fault_visibility_changed = pyqtSignal()
+    fault_color_changed = pyqtSignal()
+    fault_removed = pyqtSignal()
     export_requested = pyqtSignal(int)
-    publish_requested = pyqtSignal(int) # Signal for "Map" button
-    export_all_requested = pyqtSignal()  # Signal for batch export
+    publish_requested = pyqtSignal(int)
+    export_all_requested = pyqtSignal()  # Signal for batch export # Signal for "Map" button
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Horizon Interpretation Manager")
-        self.resize(650, 400) # Slightly wider for new column
+        self.setWindowTitle("Fault Interpretation Manager")
+        self.resize(650, 400)
         
         self.setWindowFlags(Qt.Window)
         
-        self.horizons = []
-        self.active_horizon_index = -1
+        self.faults = []
+        self.active_fault_index = -1
         self.is_picking = False
         
         layout = QVBoxLayout(self)
         
         # Toolbar
         btn_layout = QHBoxLayout()
-        self.btn_new = QPushButton("+ New Horizon"); self.btn_new.clicked.connect(self.create_horizon)
-        self.btn_import = QPushButton("Import CSV"); self.btn_import.clicked.connect(self.import_horizon)
+        self.btn_new = QPushButton("+ New Fault"); self.btn_new.clicked.connect(self.create_fault)
+        self.btn_import = QPushButton("Import CSV"); self.btn_import.clicked.connect(self.import_fault)
         btn_layout.addWidget(self.btn_new); btn_layout.addWidget(self.btn_import)
         layout.addLayout(btn_layout)
         
         # Table
         self.table = QTableWidget()
-        # Increased columns to 6 to add "Vis" (Visibility)
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(["Active", "Vis", "Name", "Color", "Points", "Actions"])
         
         # Column Resizing
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # Name stretches
-        self.table.setColumnWidth(0, 50) # Active radio
-        self.table.setColumnWidth(1, 40) # Vis checkbox
-        self.table.setColumnWidth(3, 50) # Color
-        self.table.setColumnWidth(4, 60) # Points
-        self.table.setColumnWidth(5, 80) # Actions
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table.setColumnWidth(0, 50)
+        self.table.setColumnWidth(1, 40)
+        self.table.setColumnWidth(3, 50)
+        self.table.setColumnWidth(4, 60)
+        self.table.setColumnWidth(5, 80)
         
-        # --- CRITICAL FIX: Connect item changed signal to save Name edits ---
         self.table.itemChanged.connect(self.on_item_changed)
         
         layout.addWidget(self.table)
@@ -80,113 +78,109 @@ class HorizonManager(QDialog):
         
         layout.addLayout(action_layout)
 
-    def create_horizon(self):
-        count = len(self.horizons) + 1
+    def create_fault(self):
+        count = len(self.faults) + 1
         colors = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#00FFFF', '#FF00FF']
-        color = colors[len(self.horizons) % len(colors)]
-        self.horizons.append({'name': f"Horizon_{count}", 'color': color, 'points': [], 'visible': True})
-        self.refresh_table(); self.set_active_horizon(len(self.horizons)-1)
+        color = colors[len(self.faults) % len(colors)]
+        self.faults.append({'name': f"Fault_{count}", 'color': color, 'points': [], 'visible': True})
+        self.refresh_table(); self.set_active_fault(len(self.faults)-1)
 
-    def import_horizon(self):
+    def import_fault(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Import CSV", "", "CSV (*.csv *.txt)")
         if not file_path: return
         try:
+            # Assumes Column 0 is X, Column 1 is Y/Time. Presereves order!
             df = pd.read_csv(file_path, header=None, skiprows=1, usecols=[0, 1])
             points = list(zip(df[0], df[1]))
             name = os.path.basename(file_path).split('.')[0]
             colors = ['#FF0000', '#00FF00', '#0000FF']
-            color = colors[len(self.horizons) % len(colors)]
-            self.horizons.append({'name': name, 'color': color, 'points': points, 'visible': True})
-            self.refresh_table(); self.horizon_visibility_changed.emit()
+            color = colors[len(self.faults) % len(colors)]
+            self.faults.append({'name': name, 'color': color, 'points': points, 'visible': True})
+            self.refresh_table(); self.fault_visibility_changed.emit()
         except Exception as e: QMessageBox.critical(self, "Error", str(e))
 
     def on_item_changed(self, item):
-        """Handle edits to table cells (specifically the Name column)."""
-        # Column 2 is Name
         if item.column() == 2:
             row = item.row()
-            if row < len(self.horizons):
+            if row < len(self.faults):
                 new_name = item.text()
-                self.horizons[row]['name'] = new_name
-                # If currently picking this horizon, update the status label
-                if row == self.active_horizon_index and self.is_picking:
+                self.faults[row]['name'] = new_name
+                if row == self.active_fault_index and self.is_picking:
                      self.lbl_status.setText(f"Status: Picking on {new_name}")
 
     def refresh_table(self):
-        # Block signals to prevent 'on_item_changed' from firing while we build the table
         self.table.blockSignals(True)
-        self.table.setRowCount(len(self.horizons))
+        self.table.setRowCount(len(self.faults))
         
         for btn in self.pick_group.buttons(): self.pick_group.removeButton(btn)
         
-        for i, h in enumerate(self.horizons):
-            # 0. Active Radio Button
-            rb = QRadioButton(); rb.setChecked(i == self.active_horizon_index)
-            rb.toggled.connect(lambda c, idx=i: self.set_active_horizon(idx) if c else None)
+        for i, f in enumerate(self.faults):
+            # 0. Active
+            rb = QRadioButton(); rb.setChecked(i == self.active_fault_index)
+            rb.toggled.connect(lambda c, idx=i: self.set_active_fault(idx) if c else None)
             self.pick_group.addButton(rb)
             w_rb = QWidget(); l = QHBoxLayout(w_rb); l.addWidget(rb); l.setAlignment(Qt.AlignCenter); l.setContentsMargins(0,0,0,0)
             self.table.setCellWidget(i, 0, w_rb)
             
-            # 1. NEW: Visibility Checkbox
+            # 1. Vis
             chk_vis = QCheckBox()
-            chk_vis.setChecked(h.get('visible', True))
-            # Connect toggle to data update
-            chk_vis.toggled.connect(lambda c, idx=i: self.toggle_horizon_vis(idx, c))
+            chk_vis.setChecked(f.get('visible', True))
+            chk_vis.toggled.connect(lambda c, idx=i: self.toggle_fault_vis(idx, c))
             w_vis = QWidget(); l2 = QHBoxLayout(w_vis); l2.addWidget(chk_vis); l2.setAlignment(Qt.AlignCenter); l2.setContentsMargins(0,0,0,0)
             self.table.setCellWidget(i, 1, w_vis)
 
             # 2. Name
-            self.table.setItem(i, 2, QTableWidgetItem(h['name']))
+            self.table.setItem(i, 2, QTableWidgetItem(f['name']))
             
             # 3. Color
-            btn_col = QPushButton(); btn_col.setStyleSheet(f"background-color: {h['color']}; border: none;")
+            btn_col = QPushButton(); btn_col.setStyleSheet(f"background-color: {f['color']}; border: none;")
             btn_col.clicked.connect(lambda _, idx=i: self.change_color(idx))
             self.table.setCellWidget(i, 3, btn_col)
             
-            # 4. Point Count
-            item_pts = QTableWidgetItem(str(len(h['points'])))
+            # 4. Points
+            item_pts = QTableWidgetItem(str(len(f['points'])))
             item_pts.setFlags(item_pts.flags() ^ Qt.ItemIsEditable) 
             self.table.setItem(i, 4, item_pts)
             
-            # 5. Actions (Map + Delete)
+            # 5. Actions
             action_widget = QWidget()
             action_layout = QHBoxLayout(action_widget)
             action_layout.setContentsMargins(2, 2, 2, 2)
             action_layout.setSpacing(4)
             
             btn_map = QPushButton("Map")
-            btn_map.setToolTip("Publish horizon as a layer to QGIS Map Canvas")
+            btn_map.setToolTip("Publish fault to QGIS")
             btn_map.setStyleSheet("background-color: #e6ffe6; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
             btn_map.setFixedWidth(40)
             btn_map.clicked.connect(lambda _, idx=i: self.publish_requested.emit(idx))
             
             btn_del = QPushButton("X")
-            btn_del.setToolTip("Delete Horizon")
+            btn_del.setToolTip("Delete Fault")
             btn_del.setStyleSheet("background-color: #ffcccc; color: red; font-weight: bold; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
             btn_del.setFixedWidth(25)
-            btn_del.clicked.connect(lambda _, idx=i: self.delete_horizon(idx))
+            btn_del.clicked.connect(lambda _, idx=i: self.delete_fault(idx))
             
             action_layout.addWidget(btn_map)
             action_layout.addWidget(btn_del)
             self.table.setCellWidget(i, 5, action_widget)
             
-        self.btn_pick.setEnabled(len(self.horizons) > 0)
+        self.btn_pick.setEnabled(len(self.faults) > 0)
         self.table.blockSignals(False)
 
-    def toggle_horizon_vis(self, index, state):
-        self.horizons[index]['visible'] = state
-        self.horizon_visibility_changed.emit()
+    def toggle_fault_vis(self, index, state):
+        self.faults[index]['visible'] = state
+        self.fault_visibility_changed.emit()
 
-    def set_active_horizon(self, index):
-        self.active_horizon_index = index
+    def set_active_fault(self, index):
+        self.active_fault_index = index
         if self.is_picking:
-            name = self.horizons[index]['name']
+            name = self.faults[index]['name']
             self.lbl_status.setText(f"Status: Picking on {name}"); self.picking_toggled.emit(True, name)
 
     def toggle_picking(self, checked):
         self.is_picking = checked
-        if self.active_horizon_index == -1: self.is_picking = False; self.btn_pick.setChecked(False); return
-        name = self.horizons[self.active_horizon_index]['name']
+        if self.active_fault_index == -1: self.is_picking = False; self.btn_pick.setChecked(False); return
+        name = self.faults[self.active_fault_index]['name']
         if self.is_picking:
             self.btn_pick.setText("Stop Picking"); self.btn_pick.setStyleSheet("background-color: #ffcccc; color: red; font-weight: bold;")
             self.lbl_status.setText(f"Status: Picking on {name}"); self.lbl_status.setStyleSheet("font-weight: bold; color: red;")
@@ -196,60 +190,35 @@ class HorizonManager(QDialog):
         self.picking_toggled.emit(self.is_picking, name)
 
     def add_point(self, x, y):
-        if self.active_horizon_index == -1: return
-        self.horizons[self.active_horizon_index]['points'].append((x, y))
-        self.horizons[self.active_horizon_index]['points'].sort(key=lambda p: p[0])
+        if self.active_fault_index == -1: return
+        # CRITICAL DIFFERENCE: APPEND ONLY, NO SORTING
+        self.faults[self.active_fault_index]['points'].append((x, y))
         
-        count = len(self.horizons[self.active_horizon_index]['points'])
+        count = len(self.faults[self.active_fault_index]['points'])
         item = QTableWidgetItem(str(count))
         item.setFlags(item.flags() ^ Qt.ItemIsEditable)
-        self.table.setItem(self.active_horizon_index, 4, item) # Updated col index
+        self.table.setItem(self.active_fault_index, 4, item)
         
-        self.horizon_visibility_changed.emit()
-
-    def delete_closest_point(self, x, y, tolerance_x=10, tolerance_y=50):
-        if self.active_horizon_index == -1: return
-        
-        points = self.horizons[self.active_horizon_index]['points']
-        if not points: return
-        
-        candidates = []
-        for i, p in enumerate(points):
-            dx = abs(p[0] - x)
-            dy = abs(p[1] - y)
-            if dx <= tolerance_x and dy <= tolerance_y:
-                candidates.append((i, dx + dy))
-        
-        if candidates:
-            candidates.sort(key=lambda k: k[1])
-            idx_to_remove = candidates[0][0]
-            del points[idx_to_remove]
-            
-            count = len(points)
-            item = QTableWidgetItem(str(count))
-            item.setFlags(item.flags() ^ Qt.ItemIsEditable)
-            self.table.setItem(self.active_horizon_index, 4, item) # Updated col index
-            
-            self.horizon_visibility_changed.emit()
+        self.fault_visibility_changed.emit()
 
 
 
     def change_color(self, index):
-        col = QColorDialog.getColor(QColor(self.horizons[index]['color']), self)
-        if col.isValid(): self.horizons[index]['color'] = col.name(); self.refresh_table(); self.horizon_color_changed.emit()
+        col = QColorDialog.getColor(QColor(self.faults[index]['color']), self)
+        if col.isValid(): self.faults[index]['color'] = col.name(); self.refresh_table(); self.fault_color_changed.emit()
 
-    def delete_horizon(self, index):
-        if index == self.active_horizon_index: self.toggle_picking(False); self.active_horizon_index = -1
-        del self.horizons[index]; self.refresh_table(); self.horizon_removed.emit()
+    def delete_fault(self, index):
+        if index == self.active_fault_index: self.toggle_picking(False); self.active_fault_index = -1
+        del self.faults[index]; self.refresh_table(); self.fault_removed.emit()
 
     def request_export(self):
-        if self.active_horizon_index != -1: self.export_requested.emit(self.active_horizon_index)
-        else: QMessageBox.warning(self, "Warning", "No horizon selected.")
+        if self.active_fault_index != -1: self.export_requested.emit(self.active_fault_index)
+        else: QMessageBox.warning(self, "Warning", "No fault selected.")
 
     def get_state(self):
-        return self.horizons
+        return self.faults
 
-    def restore_state(self, horizons_data):
-        if not horizons_data: return
-        self.horizons = horizons_data
+    def restore_state(self, faults_data):
+        if not faults_data: return
+        self.faults = faults_data
         self.refresh_table()
