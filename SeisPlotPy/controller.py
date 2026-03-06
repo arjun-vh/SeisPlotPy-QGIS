@@ -3,12 +3,10 @@ from qgis.PyQt.QtWidgets import (QApplication, QFileDialog, QMessageBox, QInputD
                              QMenuBar, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QDoubleSpinBox, QDialog, QDialogButtonBox, 
                              QComboBox, QRadioButton, QButtonGroup, QAction)
-from qgis.PyQt.QtWidgets import (QApplication, QFileDialog, QMessageBox, QInputDialog, 
-                             QMenuBar, QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-                             QDoubleSpinBox, QDialog, QDialogButtonBox, 
-                             QComboBox, QRadioButton, QButtonGroup, QAction)
+from qgis.PyQt.QtCore import QSettings
+
 from qgis.PyQt.QtGui import QCursor, QIcon, QColor, QPainter
-from qgis.PyQt.QtCore import Qt, QVariant, QTimer
+from qgis.PyQt.QtCore import Qt, QVariant, QTimer, QObject, QEvent
 import json
 
 # --- QGIS IMPORTS ---
@@ -28,10 +26,10 @@ import pyqtgraph as pg
 
 # Internal Imports
 from .ui.seismic_view import SeismicView
-from .ui.header_tools import TextHeaderDialog, HeaderQCPlot, SpectrumPlot, HeaderExportDialog
+from .ui.header_tools import TextHeaderDialog, HeaderQCPlot, SpectrumPlot, HeaderExportDialog, HeaderExplorer, HeaderPatchDialog
 from .ui.horizon_manager import HorizonManager
+from .ui.fault_manager import FaultManager
 from .ui.dialogs import GeometryDialog, BandpassDialog
-from .ui.header_tools import HeaderExplorer
 from .ui.dialogs import ExportSubsetDialog
 from .core.data_handler import SeismicDataManager
 from .core.processing import SeismicProcessing
@@ -40,8 +38,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-class MainController:
+class MainController(QObject):
     def __init__(self, iface):
+        super().__init__()
         self.iface = iface 
         self.view = SeismicView()
         self.data_manager = None
@@ -53,9 +52,13 @@ class MainController:
         
         self.is_programmatic_update = False
         self.is_picking_mode = False 
+        self.is_fault_picking_mode = False
         
         self.horizon_manager = HorizonManager(None)
         self.horizon_items = [] 
+        
+        self.fault_manager = FaultManager(None)
+        self.fault_items = [] 
         
         # --- Navigation Attributes ---
         self.coord_tree = None      
@@ -65,6 +68,10 @@ class MainController:
         self.world_coords = None
         self.coord_step = 1  # Track decimation step for coordinate array   
         
+        # Performance Cache
+        self.map_xform = None
+        self.last_map_crs = None
+        self.last_layer_crs = None
 
         # --- Hook into the Window Close Event ---
         self.view.closeEvent = self.cleanup_on_close
@@ -73,6 +80,10 @@ class MainController:
         self.horizon_manager.horizon_visibility_changed.connect(self.save_horizons)
         self.horizon_manager.horizon_removed.connect(self.save_horizons)
         self.horizon_manager.horizon_color_changed.connect(self.save_horizons)
+        # Fault Auto-save
+        self.fault_manager.fault_visibility_changed.connect(self.save_faults)
+        self.fault_manager.fault_removed.connect(self.save_faults)
+        self.fault_manager.fault_color_changed.connect(self.save_faults)
         # We need to capture when a point is added too, which emits visibility changed? Yes, checked source.
 
         
@@ -104,13 +115,71 @@ class MainController:
         
         self.horizon_manager.export_requested.connect(self.handle_horizon_export)
         self.horizon_manager.publish_requested.connect(self.publish_horizon_to_map)
+        self.horizon_manager.export_all_requested.connect(self.handle_horizon_batch_export)
+        
+        # Fault Signals
+        self.fault_manager.picking_toggled.connect(self.set_fault_picking_mode)
+        self.fault_manager.fault_visibility_changed.connect(self.draw_faults)
+        self.fault_manager.fault_color_changed.connect(self.draw_faults)
+        self.fault_manager.fault_removed.connect(self.draw_faults)
+        self.fault_manager.export_requested.connect(self.handle_fault_export)
+        self.fault_manager.publish_requested.connect(self.publish_fault_to_map)
+        self.fault_manager.export_all_requested.connect(self.handle_fault_batch_export)
         
         self.view.plot_widget.scene().sigMouseClicked.connect(self.on_plot_clicked)
 
         # --- NEW CONNECTION ---
         self.view.plot_widget.scene().sigMouseMoved.connect(self.on_mouse_moved)
         
+        #  --- KEYBOARD SHORTCUTS ---
+        self.view.installEventFilter(self)
+        
         self.view.show()
+
+    def eventFilter(self, obj, event):
+        """Intercept keyboard events for shortcuts."""
+        if event.type() == QEvent.KeyPress:
+            key = event.key()
+            modifiers = event.modifiers()
+            
+            # Esc: Exit picking mode
+            if key == Qt.Key_Escape:
+                if self.is_picking_mode:
+                    self.horizon_manager.toggle_picking(False)
+                    return True
+                elif self.is_fault_picking_mode:
+                    self.fault_manager.toggle_picking(False)
+                    return True
+            
+            # Ctrl+Z: REMOVED per user request
+            # elif key == Qt.Key_Z and modifiers == Qt.ControlModifier:
+            #     pass
+            
+            # Delete: Remove selected horizon/fault
+            elif key == Qt.Key_Delete:
+                if self.horizon_manager.isVisible() and self.horizon_manager.active_horizon_index >= 0:
+                    self.delete_selected_horizon()
+                    return True
+                elif self.fault_manager.isVisible() and self.fault_manager.active_fault_index >= 0:
+                    self.delete_selected_fault()
+                    return True
+        
+        return super().eventFilter(obj, event)
+    
+    def get_last_export_dir(self):
+        """Retrieve last used export directory from QSettings."""
+        settings = QSettings("SeisPlotPy", "ExportSettings")
+        last_dir = settings.value("last_export_dir", "")
+        if last_dir and os.path.exists(last_dir):
+            return last_dir
+        return os.path.expanduser("~")  # Default to home directory
+    
+    def save_last_export_dir(self, file_path):
+        """Save the directory of the exported file for next time."""
+        if file_path:
+            directory = os.path.dirname(file_path)
+            settings = QSettings("SeisPlotPy", "ExportSettings")
+            settings.setValue("last_export_dir", directory)
 
     # =========================================================================
     # --- CLEANUP & MAP INTERACTION ---
@@ -128,6 +197,27 @@ class MainController:
         if self.view_highlight:
             self.view_highlight.reset(QgsWkbTypes.LineGeometry)
             self.view_highlight = None
+        
+        # --- FIX: Explicitly disconnect manager signals to prevent memory leaks ---
+        try:
+            self.horizon_manager.horizon_visibility_changed.disconnect(self.save_horizons)
+            self.horizon_manager.horizon_removed.disconnect(self.save_horizons)
+            self.horizon_manager.horizon_color_changed.disconnect(self.save_horizons)
+            self.horizon_manager.picking_toggled.disconnect(self.set_picking_mode)
+            self.horizon_manager.horizon_visibility_changed.disconnect(self.draw_horizons)
+            self.horizon_manager.horizon_color_changed.disconnect(self.draw_horizons)
+            self.horizon_manager.horizon_removed.disconnect(self.draw_horizons)
+            
+            self.fault_manager.fault_visibility_changed.disconnect(self.save_faults)
+            self.fault_manager.fault_removed.disconnect(self.save_faults)
+            self.fault_manager.fault_color_changed.disconnect(self.save_faults)
+            self.fault_manager.picking_toggled.disconnect(self.set_fault_picking_mode)
+            self.fault_manager.fault_visibility_changed.disconnect(self.draw_faults)
+            self.fault_manager.fault_color_changed.disconnect(self.draw_faults)
+            self.fault_manager.fault_removed.disconnect(self.draw_faults)
+        except TypeError:
+            pass  # Signal was already disconnected or never connected
+        # -------------------------------------------------------------------------
         
         # CRITICAL CHANGE: Do NOT remove the layer from QGIS Project.
         # The layer persists so it can be double-clicked later to re-open this window.
@@ -157,6 +247,30 @@ class MainController:
         crs_def = ""
         if crs is not None and crs.isValid():
             crs_def = f"?crs={crs.authid()}"
+
+        # --- FIX: Check for Existing Layer to Prevent Duplication ---
+        existing_layers = QgsProject.instance().mapLayers().values()
+        target_path = self.data_manager.file_path
+        
+        for l in existing_layers:
+            # Check custom property
+            l_path = l.customProperty("seisplotpy_path")
+            if l_path:
+                # Resolve relative path to absolute to compare
+                abs_l_path = os.path.abspath(QgsProject.instance().readPath(l_path))
+                if os.path.abspath(target_path) == abs_l_path:
+                    self.view.update_status(f"Linked to existing layer: {l.name()}")
+                    self.qgis_layer = l
+                    
+                    # Re-connect signal just in case
+                    try: l.willBeDeleted.disconnect(self.on_layer_deleted)
+                    except Exception: pass
+                    l.willBeDeleted.connect(self.on_layer_deleted)
+                    
+                    # Update its properties just to be sure
+                    self.update_layer_state()
+                    return
+        # -------------------------------------------------------------
 
         layer = QgsVectorLayer(f"LineString{crs_def}", layer_name, "memory")
         pr = layer.dataProvider()
@@ -188,7 +302,7 @@ class MainController:
                     xform = QgsCoordinateTransform(crs, map_crs, QgsProject.instance())
                     map_extent = xform.transformBoundingBox(layer_extent)
                     self.iface.mapCanvas().setExtent(map_extent)
-                except:
+                except Exception:
                     self.iface.mapCanvas().setExtent(layer_extent)
             else:
                 self.iface.mapCanvas().setExtent(layer_extent)
@@ -196,14 +310,13 @@ class MainController:
             self.iface.mapCanvas().refresh()
             
         # Metadata for Persistence
-        # --- FIX: Store RELATIVE Path ---
-        # Convert absolute path -> relative path (e.g. "./data/line.sgy")
+        # Dual path storage for robust restoration
         rel_path = QgsProject.instance().writePath(self.data_manager.file_path)
-        layer.setCustomProperty("seisplotpy_path", rel_path)
+        abs_path = os.path.abspath(self.data_manager.file_path)
+        layer.setCustomProperty("seisplotpy_path", rel_path)  # Legacy compatibility
+        layer.setCustomProperty("seisplotpy_path_relative", rel_path)
+        layer.setCustomProperty("seisplotpy_path_absolute", abs_path)
         # -------------------------------
-        
-        if geom_params:
-             layer.setCustomProperty("seisplotpy_geometry_params", json.dumps(geom_params))
         
         # SAVE GEOMETRY PARAMS (Headers/Scalar used)
         # Consolidate on GeometryDialog format
@@ -223,11 +336,14 @@ class MainController:
                 state = self.get_state()
                 if state:
                     self.qgis_layer.setCustomProperty("seisplotpy_state", json.dumps(state))
-                    # Also update the top-level path property to be relative
-                    # This ensures that if you "Save As" the project elsewhere, the path updates
+                    # Update dual path properties
                     rel_path = QgsProject.instance().writePath(self.data_manager.file_path)
+                    abs_path = os.path.abspath(self.data_manager.file_path)
                     self.qgis_layer.setCustomProperty("seisplotpy_path", rel_path)
-            except: pass
+                    self.qgis_layer.setCustomProperty("seisplotpy_path_relative", rel_path)
+                    self.qgis_layer.setCustomProperty("seisplotpy_path_absolute", abs_path)
+            except Exception as e:
+                print(f"SeisPlotPy Warning [Layer State Update]: {e}")
 
     def _transform_mouse_point(self, point):
         """Helper to transform Map Canvas Point -> Layer CRS Point."""
@@ -244,8 +360,16 @@ class MainController:
             layer_crs = self.qgis_layer.crs() 
 
             if canvas_crs != layer_crs and layer_crs.isValid():
-                xform = QgsCoordinateTransform(canvas_crs, layer_crs, QgsProject.instance())
-                return xform.transform(point)
+                # --- CACHE ---
+                if (self.map_xform is None or 
+                    self.last_map_crs != canvas_crs or 
+                    self.last_layer_crs != layer_crs):
+                    
+                    self.map_xform = QgsCoordinateTransform(canvas_crs, layer_crs, QgsProject.instance())
+                    self.last_map_crs = canvas_crs
+                    self.last_layer_crs = layer_crs
+                
+                return self.map_xform.transform(point)
         except (RuntimeError, Exception):
             # If the layer was deleted, this catches the error and prevents the crash
             self.qgis_layer = None
@@ -286,10 +410,12 @@ class MainController:
                 # Distance in layer units for 10 pixels
                 dist_layer = np.sqrt(pt_layer.sqrDist(pt_layer_plus))
                 tolerance = dist_layer * 2 # 20 pixels total tolerance (10px * 2)
-            except: pass
+            except Exception as e:
+                print(f"SeisPlotPy Warning [Mouse Hover Tolerance Calc]: {e}")
 
         if dist > tolerance: 
             if self.map_marker: self.map_marker.hide()
+            self.view.plot_widget.setToolTip("") # Clear tooltip
             return
             
         real_idx = idx * self.coord_step
@@ -302,6 +428,11 @@ class MainController:
             plot_x_value = self.active_header_map[real_idx]
         else:
             plot_x_value = real_idx
+
+        # --- FIX: Update Status Bar Coordinates ---
+        # Show Map Coordinates (Raw) and Plot Coordinate (Trace/CDP)
+        self.view.lbl_coords.setText(f"Map: {point.x():.2f}, {point.y():.2f} | Seismic: {plot_x_value:.1f}")
+        # ------------------------------------------
 
         self.update_map_marker(plot_x_value)
 
@@ -325,7 +456,8 @@ class MainController:
                 xform = QgsCoordinateTransform(map_crs, layer_crs, QgsProject.instance())
                 dist_layer = np.sqrt(xform.transform(pt_map).sqrDist(xform.transform(pt_map_plus)))
                 tolerance = dist_layer
-            except: pass
+            except Exception as e:
+                print(f"SeisPlotPy Warning [Layer Double-Click Tolerance]: {e}")
         
         if dist < tolerance:
             self.view.showNormal() 
@@ -379,7 +511,7 @@ class MainController:
                 else:
                     start_idx = int(np.clip(min_val, 0, n_points))
                     end_idx = int(np.clip(max_val, 0, n_points))
-            except:
+            except Exception:
                 start_idx = 0; end_idx = n_points
         else:
             start_idx = 0; end_idx = n_points
@@ -410,7 +542,7 @@ class MainController:
             if self.qgis_layer.isValid():
                 self.view_highlight.setToGeometry(geom, self.qgis_layer.crs())
                 self.view_highlight.show()
-        except:
+        except Exception:
             pass
 
     # =========================================================================
@@ -440,22 +572,90 @@ class MainController:
         return state
 
     def restore_state(self, state):
-        """Restores state from dict and rebuilds navigation index."""
+        """Restores state from dict with robust path resolution and browse dialog."""
         if not state: return
         
-        # --- FIX: Read & Resolve Path ---
+        # Multi-step path resolution strategy
         raw_path = state.get("file_path", "")
-        # Convert "./data/line.sgy" -> "D:/data/line.sgy"
-        path = QgsProject.instance().readPath(raw_path)
-        if not path or not os.path.exists(path):
-            self.view.update_status(f"File not found: {path}"); return
+        resolved_path = None
+        path_source = None
+        
+        # Step 1: Try relative path (primary - works when project is moved correctly)
+        try:
+            rel_path = QgsProject.instance().readPath(raw_path)
+            if rel_path and os.path.exists(rel_path):
+                resolved_path = rel_path
+                path_source = "relative"
+        except Exception:
+            pass
+        
+        # Step 2: Try absolute path from layer (fallback for moved projects)
+        if not resolved_path and self.qgis_layer:
+            abs_path = self.qgis_layer.customProperty("seisplotpy_path_absolute", "")
+            if abs_path and os.path.exists(abs_path):
+                resolved_path = abs_path
+                path_source = "absolute"
+        
+        # Step 3: If both failed, show browse dialog
+        if not resolved_path:
+            base_name = os.path.basename(raw_path) if raw_path else "SEG-Y file"
+            reply = QMessageBox.question(
+                self.view,
+                "File Not Found",
+                f"Cannot locate:\n{raw_path}\n\nWould you like to browse for the file?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            
+            if reply == QMessageBox.Yes:
+                # Get last known directory or home
+                last_dir = os.path.dirname(raw_path) if raw_path else os.path.expanduser("~")
+                if not os.path.exists(last_dir):
+                    last_dir = os.path.expanduser("~")
+                
+                browsed_path, _ = QFileDialog.getOpenFileName(
+                    self.view,
+                    f"Locate {base_name}",
+                    last_dir,
+                    "SEG-Y Files (*.sgy *.segy);;All Files (*.*)"
+                )
+                
+                if browsed_path and os.path.exists(browsed_path):
+                    resolved_path = browsed_path
+                    path_source = "browse"
+                    # Update layer with new path
+                    if self.qgis_layer:
+                        rel_path_new = QgsProject.instance().writePath(browsed_path)
+                        abs_path_new = os.path.abspath(browsed_path)
+                        self.qgis_layer.setCustomProperty("seisplotpy_path", rel_path_new)
+                        self.qgis_layer.setCustomProperty("seisplotpy_path_relative", rel_path_new)
+                        self.qgis_layer.setCustomProperty("seisplotpy_path_absolute", abs_path_new)
+                else:
+                    self.view.update_status("Restoration cancelled")
+                    return
+            else:
+                self.view.update_status("Restoration cancelled")
+                return
+        
+        # If we got here, we have a valid path
+        if not resolved_path:
+            msg = f"File not found.\\nOriginal: {raw_path}"
+            if resolved_path: msg += f"\\nResolved: {resolved_path}"
+            self.view.update_status(msg)
+            return
+        
+        # Notify user if path was auto-adjusted
+        if path_source == "absolute":
+            self.view.update_status(f"Restored from moved location: {os.path.basename(resolved_path)}")
+        elif path_source == "browse":
+            self.view.update_status(f"Restored from: {os.path.basename(resolved_path)}")
 
         try:
             self.view.update_status("Restoring session...")
             
             # 1. Initialize Data Manager if not already set
             if not self.data_manager:
-                self.data_manager = SeismicDataManager(path)
+                self.data_manager = SeismicDataManager(resolved_path)
             
             self.full_cum_dist = None; self.dist_unit = "m"
             
@@ -582,12 +782,13 @@ class MainController:
                     cdp_y = self.data_manager.get_header_slice('CDP_Y', 0, self.data_manager.n_traces, 10)
                     if np.any(cdp_x) and np.any(cdp_y):
                          self.create_qgis_layer(cdp_x, cdp_y, None) 
-                except: pass
+                except Exception as e:
+                    print(f"SeisPlotPy Warning [Fallback Layer Creation]: {e}")
             
             self.load_horizons()
             
             self.view.btn_load.setEnabled(False)
-            self.view.btn_load.setText(f"Linked: {os.path.basename(path)}")
+            self.view.btn_load.setText(f"Linked: {os.path.basename(self.data_manager.file_path)}")
             
         except Exception as e:
             self.view.update_status(f"Restore failed: {e}")
@@ -601,7 +802,13 @@ class MainController:
             data = self.horizon_manager.get_state()
             with open(path, 'w') as f:
                 json.dump(data, f)
-        except: pass
+        except Exception as e:
+            print(f"SeisPlotPy Warning [Horizon Save]: {e}")
+        else:
+            # Success - provide subtle feedback
+            self.view.update_status("Horizons auto-saved ✓")
+            # Auto-clear the success message after 2 seconds
+            QTimer.singleShot(2000, lambda: self.view.update_status(f"Linked: {os.path.basename(self.data_manager.file_path)}") if self.data_manager else None)
 
     def load_horizons(self):
         """Loads horizons from sidecar JSON."""
@@ -613,37 +820,356 @@ class MainController:
                     data = json.load(f)
                 self.horizon_manager.restore_state(data)
                 self.draw_horizons()
-            except: pass
+                # Also load faults if present
+                self.load_faults()
+            except Exception as e:
+                print(f"SeisPlotPy Warning [Horizon/Fault Load]: {e}")
 
     # =========================================================================
     # --- CORE & UI LOGIC ---
     # =========================================================================
 
     def on_plot_clicked(self, event):
-        if not self.is_picking_mode: return
         pos = event.scenePos()
-        if self.view.plot_widget.plotItem.sceneBoundingRect().contains(pos):
-            mousePoint = self.view.plot_widget.getPlotItem().vb.mapSceneToView(pos)
-            click_x = mousePoint.x()
-            click_y = mousePoint.y()
-            trace_idx = int(click_x)
-            header = self.view.combo_header.currentText()
-            if header == "Trace Index":
-                trace_idx = int(round(click_x))
-            elif self.active_header_map is not None:
-                if len(self.active_header_map) > 0:
-                    trace_idx = int((np.abs(self.active_header_map - click_x)).argmin())
+        if not self.view.plot_widget.plotItem.sceneBoundingRect().contains(pos): return
+        
+        mousePoint = self.view.plot_widget.getPlotItem().vb.mapSceneToView(pos)
+        click_x = mousePoint.x()
+        click_y = mousePoint.y()
+        
+        # Determine Trace Index
+        trace_idx = int(click_x)
+        header = self.view.combo_header.currentText()
+        if header == "Trace Index": map_array = None
+        elif header == "Cumulative Distance": map_array = self.full_cum_dist
+        elif self.active_header_map is not None: map_array = self.active_header_map
+        else: map_array = None
+
+        if header == "Trace Index":
+            trace_idx = int(round(click_x))
+        elif map_array is not None:
+            if getattr(self, 'x_vals', None) is not None and len(self.x_vals) > 1:
+                n_loaded = len(self.x_vals)
+                screen_x = np.linspace(self.x_vals[0], self.x_vals[-1], n_loaded)
+                dist_arr = np.abs(screen_x - click_x)
+                i = int(dist_arr.argmin())
+                start = getattr(self, 'loaded_start_trace', 0)
+                end = getattr(self, 'loaded_end_trace', len(map_array))
+                exact_trace = np.linspace(start, end, n_loaded)
+                trace_idx = int(round(exact_trace[i]))
+            elif len(map_array) > 0:
+                trace_idx = int((np.abs(map_array - click_x)).argmin())
+        
+        # 1. Horizon Picking
+        if self.is_picking_mode:
             if event.button() == Qt.LeftButton:
                 self.horizon_manager.add_point(trace_idx, click_y)
             elif event.button() == Qt.RightButton:
                 view_range = self.view.plot_widget.viewRange()
                 y_height = abs(view_range[1][1] - view_range[1][0])
-                y_tol = y_height * 0.02 
-                self.horizon_manager.delete_closest_point(trace_idx, click_y, tolerance_x=5, tolerance_y=y_tol)
+                self.horizon_manager.delete_closest_point(trace_idx, click_y, tolerance_x=5, tolerance_y=y_height*0.02)
+
+        # 2. Fault Picking
+        elif self.is_fault_picking_mode:
+            if event.button() == Qt.LeftButton:
+                # Faults use (Trace, Time) just like horizons
+                self.fault_manager.add_point(trace_idx, click_y)
+            elif event.button() == Qt.RightButton:
+                # Undo last point
+                self.fault_manager.delete_last_point()
 
     def set_picking_mode(self, active, horizon_name):
         self.is_picking_mode = active
-        self.view.plot_widget.setCursor(Qt.CrossCursor if active else Qt.ArrowCursor)
+        if active:
+            self.view.plot_widget.setCursor(Qt.CrossCursor)
+            self.view.update_status(f"Picking Horizon: {horizon_name}")
+            # exclusive
+            if self.is_fault_picking_mode: self.fault_manager.toggle_picking(False)
+        else:
+            self.view.plot_widget.setCursor(Qt.ArrowCursor)
+            self.view.update_status("Viewer Ready")
+
+    def set_fault_picking_mode(self, active, fault_name):
+        self.is_fault_picking_mode = active
+        if active:
+            self.view.plot_widget.setCursor(Qt.CrossCursor)
+            self.view.update_status(f"Picking Fault: {fault_name}")
+            # exclusive
+            if self.is_picking_mode: self.horizon_manager.toggle_picking(False)
+        else:
+            self.view.plot_widget.setCursor(Qt.ArrowCursor)
+            self.view.update_status("Viewer Ready")
+
+    def draw_faults(self):
+        # Clear old items
+        for item in self.fault_items:
+            self.view.plot_widget.removeItem(item)
+        self.fault_items.clear()
+        
+        # Draw new
+        for f in self.fault_manager.faults:
+            if not f.get('visible', True): continue
+            points = f['points'] # Unsorted list of (x, y)
+            if not points: continue
+            
+            x_vals, y_vals = zip(*points)
+            
+            # Map Trace Index -> X Coordinate (if needed)
+            idx_arr = np.array(x_vals, dtype=int)
+            y_arr = np.array(y_vals)
+            
+            header = self.view.combo_header.currentText()
+            if header == "Trace Index": map_array = None
+            elif header == "Cumulative Distance": map_array = self.full_cum_dist
+            elif self.active_header_map is not None: map_array = self.active_header_map
+            else: map_array = None
+
+            # Map Trace Index -> X Coordinate matching the linearly stretched image
+            if map_array is not None and getattr(self, 'x_vals', None) is not None and len(self.x_vals) > 1:
+                 start = getattr(self, 'loaded_start_trace', 0)
+                 end = getattr(self, 'loaded_end_trace', len(map_array))
+                 
+                 if end != start:
+                     slope = (self.x_vals[-1] - self.x_vals[0]) / (end - start)
+                     mapped_x = self.x_vals[0] + (idx_arr - start) * slope
+                 else:
+                     mapped_x = np.full_like(idx_arr, self.x_vals[0], dtype=float)
+            elif map_array is not None:
+                 # Fallback if x_vals isn't available
+                 mapped_x = []
+                 for t_idx in x_vals:
+                     idx = int(t_idx)
+                     if 0 <= idx < len(map_array):
+                         mapped_x.append(map_array[idx])
+                     else:
+                         mapped_x.append(t_idx)
+            else:
+                 mapped_x = x_vals
+            
+            # Create PlotCurveItem (Polyline)
+            curve = pg.PlotCurveItem(
+                x=np.array(mapped_x), y=np.array(y_vals),
+                pen=pg.mkPen(f['color'], width=3),
+                symbol='o', symbolSize=5, symbolBrush=f['color']
+            )
+            self.view.plot_widget.addItem(curve)
+            self.fault_items.append(curve)
+
+    def save_faults(self):
+        """Saves faults to sidecar JSON (Parity with Horizons)."""
+        if not self.data_manager: return
+        path = self.data_manager.file_path + ".faults.json"
+        try:
+            data = self.fault_manager.get_state()
+            with open(path, 'w') as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"Error saving faults: {e}")
+        else:
+            # Success - provide subtle feedback
+            self.view.update_status("Faults auto-saved ✓")
+            QTimer.singleShot(2000, lambda: self.view.update_status(f"Linked: {os.path.basename(self.data_manager.file_path)}") if self.data_manager else None)
+
+    def load_faults(self):
+        """Loads faults from sidecar JSON."""
+        if not self.data_manager: return
+        path = self.data_manager.file_path + ".faults.json"
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                self.fault_manager.restore_state(data)
+                self.draw_faults()
+            except Exception as e: print(f"Error loading faults: {e}")
+
+    def delete_selected_horizon(self):
+        """Delete currently selected horizon with confirmation if it has many points."""
+        idx = self.horizon_manager.active_horizon_index
+        if idx < 0 or idx >= len(self.horizon_manager.horizons):
+            return
+        horizon = self.horizon_manager.horizons[idx]
+        num_points = len(horizon['points'])
+        if num_points > 5:
+            reply = QMessageBox.question(self.view, "Confirm Deletion", f"Delete horizon '{horizon['name']}' with {num_points} points?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+        self.horizon_manager.delete_horizon(idx)
+    
+    def delete_selected_fault(self):
+        """Delete currently selected fault with confirmation if it has many points."""
+        idx = self.fault_manager.active_fault_index
+        if idx < 0 or idx >= len(self.fault_manager.faults):
+            return
+        fault = self.fault_manager.faults[idx]
+        num_points = len(fault['points'])
+        if num_points > 5:
+            reply = QMessageBox.question(self.view, "Confirm Deletion", f"Delete fault '{fault['name']}' with {num_points} points?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if reply != QMessageBox.Yes:
+                return
+        self.fault_manager.delete_fault(idx)
+
+    def handle_fault_export(self, index):
+        if not self.data_manager: QMessageBox.warning(self.view, "Error", "No seismic data loaded."); return
+        f = self.fault_manager.faults[index]; points = f['points']
+        if not points: QMessageBox.warning(self.view, "Error", "Fault is empty."); return
+        
+        dlg = HeaderExportDialog(self.data_manager.available_headers, self.view)
+        if dlg.exec() != QDialog.Accepted: return
+        selected_headers = dlg.get_selected_headers()
+        
+        # Use last export directory
+        start_file = os.path.join(self.get_last_export_dir(), f"{f['name']}.csv")
+        path, _ = QFileDialog.getSaveFileName(self.view, "Save Fault CSV", start_file, "CSV (*.csv)")
+        if not path: return
+        
+        try:
+            # Points are (TraceIdx, Time)
+            x_vals, y_vals = zip(*points)
+            trace_indices = np.array(x_vals, dtype=int)
+            y_arr = np.array(y_vals)
+            
+            current_x_mode = self.view.combo_header.currentText()
+            current_y_mode = self.view.combo_domain.currentText()
+            
+            mapped_x = trace_indices
+            if self.active_header_map is not None:
+                safe_indices = np.clip(trace_indices, 0, len(self.active_header_map)-1)
+                mapped_x = self.active_header_map[safe_indices]
+                
+            df = pd.DataFrame()
+            df["Trace Index"] = trace_indices
+            df[current_y_mode] = y_arr
+            if current_x_mode != "Trace Index":
+                df[current_x_mode] = mapped_x
+            
+            # Extract Headers
+            trace_indices_clipped = np.clip(trace_indices, 0, self.data_manager.n_traces - 1)
+            
+            for hdr in selected_headers:
+                full_hdr_vals = self.data_manager.get_header_slice(hdr, 0, self.data_manager.n_traces, 1)
+                df[hdr] = full_hdr_vals[trace_indices_clipped]
+                
+            df.to_csv(path, index=False)
+            self.save_last_export_dir(path)
+            QMessageBox.information(self.view, "Success", f"Saved fault with {len(selected_headers)} extra headers.")
+        except Exception as e: QMessageBox.critical(self.view, "Export Error", str(e))
+
+    def handle_fault_batch_export(self):
+        if not self.data_manager: QMessageBox.warning(self.view, "Error", "No seismic data loaded."); return
+        visible_faults = [f for f in self.fault_manager.faults if f.get('visible', True) and f['points']]
+        if not visible_faults: QMessageBox.warning(self.view, "Error", "No visible faults with points to export."); return
+        
+        dlg = HeaderExportDialog(self.data_manager.available_headers, self.view)
+        if dlg.exec() != QDialog.Accepted: return
+        selected_headers = dlg.get_selected_headers()
+        
+        start_dir = self.get_last_export_dir()
+        dir_path = QFileDialog.getExistingDirectory(self.view, "Select Directory to Save Faults", start_dir)
+        if not dir_path: return
+        self.save_last_export_dir(dir_path)
+        
+        success_count = 0
+        try:
+            current_x_mode = self.view.combo_header.currentText()
+            current_y_mode = self.view.combo_domain.currentText()
+            
+            for f in visible_faults:
+                x_vals, y_vals = zip(*f['points'])
+                trace_indices = np.array(x_vals, dtype=int)
+                y_arr = np.array(y_vals)
+                
+                mapped_x = trace_indices
+                if self.active_header_map is not None:
+                    safe_indices = np.clip(trace_indices, 0, len(self.active_header_map)-1)
+                    mapped_x = self.active_header_map[safe_indices]
+                    
+                df = pd.DataFrame()
+                df["Trace Index"] = trace_indices
+                df[current_y_mode] = y_arr
+                if current_x_mode != "Trace Index":
+                    df[current_x_mode] = mapped_x
+                
+                trace_indices_clipped = np.clip(trace_indices, 0, self.data_manager.n_traces - 1)
+                for hdr in selected_headers:
+                    full_hdr_vals = self.data_manager.get_header_slice(hdr, 0, self.data_manager.n_traces, 1)
+                    df[hdr] = full_hdr_vals[trace_indices_clipped]
+                    
+                safe_name = "".join([c for c in f['name'] if c.isalpha() or c.isdigit() or c==' ' or c=='_']).rstrip()
+                file_path = os.path.join(dir_path, f"{safe_name}.csv")
+                df.to_csv(file_path, index=False)
+                success_count += 1
+                
+            QMessageBox.information(self.view, "Success", f"Successfully exported {success_count} faults.")
+        except Exception as e: QMessageBox.critical(self.view, "Export Error", str(e))
+
+    def publish_fault_to_map(self, index):
+        """Creates a QGIS vector layer for the selected fault (Unsorted Polyline)."""
+        if not self.data_manager or not self.qgis_layer:
+            self.view.update_status("Error: No seismic navigation layer linked.")
+            return
+
+        f = self.fault_manager.faults[index]
+        points = f['points']
+        if not points: return
+
+        name = f['name']
+        try:
+            # 1. Retrieve Geometry Settings (Same as Horizon)
+            x_key = "CDP_X"; y_key = "CDP_Y"; use_header = True
+            scalar_key = "Source_Group_Scalar"; manual_val = 1.0
+
+            p_json = self.qgis_layer.customProperty("seisplotpy_geometry_params")
+            if p_json:
+                p = json.loads(str(p_json))
+                x_key = p.get("x_key", x_key); y_key = p.get("y_key", y_key)
+                use_header = p.get("use_header", use_header)
+                scalar_key = p.get("scalar_key", scalar_key); manual_val = float(p.get("manual_val", manual_val))
+
+            # 2. Extract Trace Indices (Preserve Order!)
+            trace_indices = np.array([int(p[0]) for p in points])
+            times = np.array([p[1] for p in points])
+
+            # 3. Fetch Coordinate Arrays
+            raw_x = self.data_manager.get_header_slice(x_key, 0, self.data_manager.n_traces, 1)
+            raw_y = self.data_manager.get_header_slice(y_key, 0, self.data_manager.n_traces, 1)
+            
+            if use_header:
+                scalars = self.data_manager.get_header_slice(scalar_key, 0, self.data_manager.n_traces, 1)
+                full_x = SeismicProcessing.apply_scalar(raw_x, scalars)
+                full_y = SeismicProcessing.apply_scalar(raw_y, scalars)
+            else:
+                full_x = raw_x * manual_val; full_y = raw_y * manual_val
+
+            # 4. Map Indices -> Coords
+            trace_indices = np.clip(trace_indices, 0, len(full_x) - 1)
+            mapped_x = full_x[trace_indices]
+            mapped_y = full_y[trace_indices]
+
+            # 5. Create Layer
+            layer_crs = self.qgis_layer.crs().authid()
+            crs_def = f"?crs={layer_crs}" if layer_crs else ""
+            
+            vl = QgsVectorLayer(f"LineString{crs_def}", f"{name} (Fault)", "memory")
+            pr = vl.dataProvider()
+            
+             # Attributes: Name, MinZ, MaxZ
+            pr.addAttributes([QgsField("Name", QVariant.String), QgsField("MinZ", QVariant.Double), QgsField("MaxZ", QVariant.Double)])
+            vl.updateFields()
+
+            # Build Geometry (Unsorted Polyline)
+            qgs_pts = [QgsPointXY(x, y) for x, y in zip(mapped_x, mapped_y)]
+            feat = QgsFeature()
+            feat.setGeometry(QgsGeometry.fromPolylineXY(qgs_pts))
+            feat.setAttributes([name, float(np.min(times)), float(np.max(times))])
+            
+            pr.addFeatures([feat])
+            vl.updateExtents()
+            
+            QgsProject.instance().addMapLayer(vl)
+            self.view.update_status(f"Published Fault '{name}' to Map.")
+            
+        except Exception as e:
+            QMessageBox.critical(self.view, "Map Error", str(e))
 
     def reset_view(self):
         if not self.data_manager: return
@@ -818,6 +1344,10 @@ class MainController:
             self.action_header_explorer.setEnabled(True)
             self.action_export.setEnabled(True)
             
+            # Enable Header Utilities
+            if hasattr(self, 'action_csv_export'): self.action_csv_export.setEnabled(True)
+            if hasattr(self, 'action_csv_patch'): self.action_csv_patch.setEnabled(True)
+            
         except Exception as e:
             self.view.update_status("Load failed.")
             QMessageBox.critical(self.view, "Error", f"Failed to load file:\n{str(e)}")
@@ -859,6 +1389,12 @@ class MainController:
             self.action_export.setEnabled(True)
             self.action_histogram.setEnabled(True)
             
+            # Enable Header Utilities
+            if hasattr(self, 'action_csv_export'): self.action_csv_export.setEnabled(True)
+            if hasattr(self, 'action_csv_patch'): self.action_csv_patch.setEnabled(True)
+            if hasattr(self, 'action_text_header'): self.action_text_header.setEnabled(True)
+            if hasattr(self, 'action_header_qc'): self.action_header_qc.setEnabled(True)
+            
         except Exception as e:
             self.view.update_status("Load failed.")
             print(f"Load failed: {e}")
@@ -871,26 +1407,86 @@ class MainController:
         dlg = HeaderExportDialog(self.data_manager.available_headers, self.view)
         if dlg.exec() != QDialog.Accepted: return
         selected_headers = dlg.get_selected_headers()
-        path, _ = QFileDialog.getSaveFileName(self.view, "Save Horizon CSV", f"{h['name']}.csv", "CSV (*.csv)")
+        # Use last export directory
+        start_file = os.path.join(self.get_last_export_dir(), f"{h['name']}.csv")
+        path, _ = QFileDialog.getSaveFileName(self.view, "Save Horizon CSV", start_file, "CSV (*.csv)")
         if not path: return
+        self.save_last_export_dir(path)
         try:
-            x_vals, y_vals = zip(*points); x_arr = np.array(x_vals); y_arr = np.array(y_vals)
-            df = pd.DataFrame()
+            x_vals, y_vals = zip(*points)
+            trace_indices = np.array(x_vals, dtype=int)
+            y_arr = np.array(y_vals)
+            
             current_x_mode = self.view.combo_header.currentText()
             current_y_mode = self.view.combo_domain.currentText()
-            df[current_x_mode] = x_arr; df[current_y_mode] = y_arr
-            trace_indices = np.zeros(len(x_arr), dtype=int)
-            if current_x_mode == "Trace Index": trace_indices = np.round(x_arr).astype(int)
-            elif self.active_header_map is not None:
-                if np.all(np.diff(self.active_header_map) >= 0):
-                    trace_indices = np.searchsorted(self.active_header_map, x_arr); trace_indices = np.clip(trace_indices, 0, len(self.active_header_map)-1)
-                else:
-                    for i, val in enumerate(x_arr): trace_indices[i] = (np.abs(self.active_header_map - val)).argmin()
+            
+            mapped_x = trace_indices
+            if self.active_header_map is not None:
+                safe_indices = np.clip(trace_indices, 0, len(self.active_header_map)-1)
+                mapped_x = self.active_header_map[safe_indices]
+                
+            df = pd.DataFrame()
+            df["Trace Index"] = trace_indices
+            df[current_y_mode] = y_arr
+            if current_x_mode != "Trace Index":
+                df[current_x_mode] = mapped_x
+            
             for hdr in selected_headers:
                 full_hdr_vals = self.data_manager.get_header_slice(hdr, 0, self.data_manager.n_traces, 1)
-                df[hdr] = full_hdr_vals[trace_indices]
+                trace_indices_clipped = np.clip(trace_indices, 0, self.data_manager.n_traces - 1)
+                df[hdr] = full_hdr_vals[trace_indices_clipped]
+                
             df.to_csv(path, index=False)
+            self.save_last_export_dir(path)
             QMessageBox.information(self.view, "Success", f"Saved horizon with {len(selected_headers)} extra headers.")
+        except Exception as e: QMessageBox.critical(self.view, "Export Error", str(e))
+
+    def handle_horizon_batch_export(self):
+        if not self.data_manager: QMessageBox.warning(self.view, "Error", "No seismic data loaded."); return
+        visible_horizons = [h for h in self.horizon_manager.horizons if h.get('visible', True) and h['points']]
+        if not visible_horizons: QMessageBox.warning(self.view, "Error", "No visible horizons with points to export."); return
+        
+        dlg = HeaderExportDialog(self.data_manager.available_headers, self.view)
+        if dlg.exec() != QDialog.Accepted: return
+        selected_headers = dlg.get_selected_headers()
+        
+        start_dir = self.get_last_export_dir()
+        dir_path = QFileDialog.getExistingDirectory(self.view, "Select Directory to Save Horizons", start_dir)
+        if not dir_path: return
+        self.save_last_export_dir(dir_path)
+        
+        success_count = 0
+        try:
+            current_x_mode = self.view.combo_header.currentText()
+            current_y_mode = self.view.combo_domain.currentText()
+            
+            for h in visible_horizons:
+                x_vals, y_vals = zip(*h['points'])
+                trace_indices = np.array(x_vals, dtype=int)
+                y_arr = np.array(y_vals)
+                
+                mapped_x = trace_indices
+                if self.active_header_map is not None:
+                    safe_indices = np.clip(trace_indices, 0, len(self.active_header_map)-1)
+                    mapped_x = self.active_header_map[safe_indices]
+                    
+                df = pd.DataFrame()
+                df["Trace Index"] = trace_indices
+                df[current_y_mode] = y_arr
+                if current_x_mode != "Trace Index":
+                    df[current_x_mode] = mapped_x
+                
+                trace_indices_clipped = np.clip(trace_indices, 0, self.data_manager.n_traces - 1)
+                for hdr in selected_headers:
+                    full_hdr_vals = self.data_manager.get_header_slice(hdr, 0, self.data_manager.n_traces, 1)
+                    df[hdr] = full_hdr_vals[trace_indices_clipped]
+                    
+                safe_name = "".join([c for c in h['name'] if c.isalpha() or c.isdigit() or c==' ' or c=='_']).rstrip()
+                file_path = os.path.join(dir_path, f"{safe_name}.csv")
+                df.to_csv(file_path, index=False)
+                success_count += 1
+                
+            QMessageBox.information(self.view, "Success", f"Successfully exported {success_count} horizons.")
         except Exception as e: QMessageBox.critical(self.view, "Export Error", str(e))
 
     def on_header_changed(self):
@@ -899,6 +1495,10 @@ class MainController:
         if header == "Trace Index": self.active_header_map = None
         elif header == "Cumulative Distance": self.active_header_map = self.full_cum_dist
         else: self.active_header_map = self.get_scaled_header(header, 0, self.data_manager.n_traces, 1)
+        
+        # Guard: If data hasn't been loaded yet (e.g. during restore), stop here.
+        if self.current_data is None: return
+
         start = self.loaded_start_trace; end = self.loaded_end_trace
         num_traces = self.current_data.shape[1]
         step = max(1, int((end-start)/num_traces)) if num_traces > 0 else 1
@@ -994,8 +1594,24 @@ class MainController:
         for h in self.horizon_manager.horizons:
             if not h['visible'] or not h['points']: continue
             idx_data, y_data = zip(*h['points']); idx_arr = np.array(idx_data, dtype=int); y_arr = np.array(y_data)
-            if map_array is not None: idx_arr = np.clip(idx_arr, 0, len(map_array)-1); x_arr = map_array[idx_arr]
-            else: x_arr = idx_arr
+            
+            # Option A: Interpolate mapped coordinates to match linearly stretched ImageItem
+            if map_array is not None and getattr(self, 'x_vals', None) is not None and len(self.x_vals) > 1:
+                n_loaded = len(self.x_vals)
+                start = getattr(self, 'loaded_start_trace', 0)
+                end = getattr(self, 'loaded_end_trace', len(map_array))
+                loaded_traces = np.linspace(start, end, n_loaded)
+                screen_x = np.linspace(self.x_vals[0], self.x_vals[-1], n_loaded)
+                
+                if loaded_traces[0] > loaded_traces[-1]:
+                    x_arr = np.interp(idx_arr, loaded_traces[::-1], screen_x[::-1])
+                else:
+                    x_arr = np.interp(idx_arr, loaded_traces, screen_x)
+            elif map_array is not None:
+                idx_arr = np.clip(idx_arr, 0, len(map_array)-1); x_arr = map_array[idx_arr]
+            else: 
+                x_arr = idx_arr
+                
             curve = pg.PlotCurveItem(x=x_arr, y=y_arr, pen=pg.mkPen(color=h['color'], width=2)); self.view.plot_widget.addItem(curve); self.horizon_items.append(curve)
             scatter = pg.ScatterPlotItem(x=x_arr, y=y_arr, size=5, brush=h['color'], pen=None); self.view.plot_widget.addItem(scatter); self.horizon_items.append(scatter)
     def setup_menu(self):
@@ -1005,10 +1621,33 @@ class MainController:
         file_menu.addAction("Export PDF/PNG", self.export_figure)
         proc_menu = menu_bar.addMenu("Processing"); self.action_agc = QAction("Apply AGC", self.view); self.action_agc.triggered.connect(self.run_agc); self.action_agc.setEnabled(False); proc_menu.addAction(self.action_agc); self.action_filter = QAction("Bandpass Filter", self.view); self.action_filter.triggered.connect(self.run_filter); self.action_filter.setEnabled(False); proc_menu.addAction(self.action_filter); proc_menu.addSeparator(); self.action_reset = QAction("Reset to Raw Data", self.view); self.action_reset.triggered.connect(self.reset_processing); self.action_reset.setEnabled(False); proc_menu.addAction(self.action_reset)
         attr_menu = menu_bar.addMenu("Attributes"); self.act_env = QAction("Instantaneous Amplitude (Envelope)", self.view); self.act_env.triggered.connect(lambda: self.run_attribute("Envelope")); self.act_env.setEnabled(False); attr_menu.addAction(self.act_env); self.act_phase = QAction("Instantaneous Phase", self.view); self.act_phase.triggered.connect(lambda: self.run_attribute("Phase")); self.act_phase.setEnabled(False); attr_menu.addAction(self.act_phase); self.act_cos = QAction("Cosine of Phase", self.view); self.act_cos.triggered.connect(lambda: self.run_attribute("Cosine Phase")); self.act_cos.setEnabled(False); attr_menu.addAction(self.act_cos); self.act_freq = QAction("Instantaneous Frequency", self.view); self.act_freq.triggered.connect(lambda: self.run_attribute("Frequency")); self.act_freq.setEnabled(False); attr_menu.addAction(self.act_freq); attr_menu.addSeparator(); self.act_rms = QAction("RMS Amplitude", self.view); self.act_rms.triggered.connect(lambda: self.run_attribute("RMS")); self.act_rms.setEnabled(False); attr_menu.addAction(self.act_rms)
-        tools_menu = menu_bar.addMenu("Tools"); self.action_dist = QAction("Setup Geometry / Distance", self.view); self.action_dist.triggered.connect(self.show_dist_tool); self.action_dist.setEnabled(False); tools_menu.addAction(self.action_dist); self.action_horizons = QAction("Horizon Manager & Picking", self.view); self.action_horizons.triggered.connect(lambda: self.horizon_manager.show()); tools_menu.addAction(self.action_horizons); self.action_text_header = QAction("View Text Header", self.view); self.action_text_header.triggered.connect(self.show_text_header); self.action_text_header.setEnabled(False); tools_menu.addAction(self.action_text_header); self.action_header_qc = QAction("Trace Header QC Plot", self.view); self.action_header_qc.triggered.connect(self.show_header_qc); self.action_header_qc.setEnabled(False); tools_menu.addAction(self.action_header_qc); self.action_spectrum = QAction("Frequency Spectrum", self.view); self.action_spectrum.triggered.connect(self.show_spectrum); self.action_spectrum.setEnabled(False); tools_menu.addAction(self.action_spectrum)
+        tools_menu = menu_bar.addMenu("Tools")
         
-        # New Header Explorer Action
-        self.action_header_explorer = QAction("Header Explorer (Binary/Trace)", self.view); self.action_header_explorer.triggered.connect(self.show_header_explorer); self.action_header_explorer.setEnabled(False); tools_menu.addAction(self.action_header_explorer)
+        # 1. Geometry & Horizon
+        self.action_dist = QAction("Setup Geometry / Distance", self.view); self.action_dist.triggered.connect(self.show_dist_tool); self.action_dist.setEnabled(False); tools_menu.addAction(self.action_dist)
+        self.action_horizons = QAction("Horizon Manager", self.view); self.action_horizons.triggered.connect(lambda: self.horizon_manager.show()); tools_menu.addAction(self.action_horizons)
+        self.action_faults = QAction("Fault Manager", self.view); self.action_faults.triggered.connect(lambda: self.fault_manager.show()); tools_menu.addAction(self.action_faults)
+        
+        tools_menu.addSeparator()
+        
+        # 2. Header Utilities Submenu
+        header_menu = tools_menu.addMenu("Header Utilities")
+        
+        # 2a. Visualizers
+        self.action_header_explorer = QAction("Header Explorer (Binary/Trace)", self.view); self.action_header_explorer.triggered.connect(self.show_header_explorer); self.action_header_explorer.setEnabled(False); header_menu.addAction(self.action_header_explorer)
+        self.action_header_qc = QAction("Trace Header QC Plot", self.view); self.action_header_qc.triggered.connect(self.show_header_qc); self.action_header_qc.setEnabled(False); header_menu.addAction(self.action_header_qc)
+        self.action_text_header = QAction("View Text Header", self.view); self.action_text_header.triggered.connect(self.show_text_header); self.action_text_header.setEnabled(False); header_menu.addAction(self.action_text_header)
+        
+        header_menu.addSeparator()
+        
+        # 2b. Modifiers
+        self.action_csv_export = QAction("Export Headers to CSV...", self.view); self.action_csv_export.triggered.connect(self.show_export_headers); self.action_csv_export.setEnabled(False); header_menu.addAction(self.action_csv_export)
+        self.action_csv_patch = QAction("Patch Headers from CSV...", self.view); self.action_csv_patch.triggered.connect(self.show_patch_headers); self.action_csv_patch.setEnabled(False); header_menu.addAction(self.action_csv_patch)
+        
+        tools_menu.addSeparator()
+        
+        # 3. Other Tools
+        self.action_spectrum = QAction("Frequency Spectrum", self.view); self.action_spectrum.triggered.connect(self.show_spectrum); self.action_spectrum.setEnabled(False); tools_menu.addAction(self.action_spectrum)
         
         self.action_export = QAction("Export SEG-Y Subset...", self.iface.mainWindow())
         self.action_export.triggered.connect(self.export_data)
@@ -1022,7 +1661,22 @@ class MainController:
         self.action_histogram.setEnabled(False)
         tools_menu.addAction(self.action_histogram)
     def show_text_header(self): 
-        if self.data_manager: TextHeaderDialog(self.data_manager.get_text_header(), self.view).exec()
+        if not self.data_manager: return
+        # Keep a reference so it's not garbage collected
+        self.text_header_dlg = TextHeaderDialog(self.data_manager.get_text_header(), self.view)
+        
+        # Connect the Accepted signal (triggered by 'Save As New File')
+        self.text_header_dlg.accepted.connect(self.on_text_header_save)
+        
+        # Show modelessly
+        self.text_header_dlg.show()
+        self.text_header_dlg.raise_()
+        self.text_header_dlg.activateWindow()
+
+    def on_text_header_save(self):
+        # Check if we have modified text to save
+        if hasattr(self, 'text_header_dlg') and self.text_header_dlg.modified_text is not None:
+             self.export_data(text_header_override=self.text_header_dlg.modified_text)
     def show_header_qc(self): 
         if self.data_manager: HeaderQCPlot(self.data_manager.available_headers, self.data_manager, self.view).exec()
     def show_spectrum(self):
@@ -1204,7 +1858,18 @@ class MainController:
                     y_arr = np.array(y_vals)
 
                     # ---FIX: Map Indices to Current X-Axis Domain ---
-                    if map_array is not None:
+                    if map_array is not None and getattr(self, 'x_vals', None) is not None and len(self.x_vals) > 1:
+                        n_loaded = len(self.x_vals)
+                        start = getattr(self, 'loaded_start_trace', 0)
+                        end = getattr(self, 'loaded_end_trace', len(map_array))
+                        loaded_traces = np.linspace(start, end, n_loaded)
+                        screen_x = np.linspace(self.x_vals[0], self.x_vals[-1], n_loaded)
+                        
+                        if loaded_traces[0] > loaded_traces[-1]:
+                            x_plot = np.interp(x_indices, loaded_traces[::-1], screen_x[::-1])
+                        else:
+                            x_plot = np.interp(x_indices, loaded_traces, screen_x)
+                    elif map_array is not None:
                         # Clip to ensure we don't crash if index is out of bounds
                         safe_indices = np.clip(x_indices, 0, len(map_array)-1)
                         x_plot = map_array[safe_indices]
@@ -1212,6 +1877,36 @@ class MainController:
                         x_plot = x_indices # Just use trace index
                     
                     ax.plot(x_plot, y_arr, color=h['color'], linewidth=1.0)
+
+            # 3. Draw Faults with COORDINATE MAPPING
+            for f in self.fault_manager.faults:
+                if f['visible'] and f['points']:
+                    # Extract stored points (Trace Index, Time)
+                    # Note: Faults might be unsorted or complex, but plot() handles them as a sequence
+                    raw_indices, y_vals = zip(*f['points'])
+                    x_indices = np.array(raw_indices, dtype=int)
+                    y_arr = np.array(y_vals)
+
+                    # Map Indices to Current X-Axis Domain
+                    if map_array is not None and getattr(self, 'x_vals', None) is not None and len(self.x_vals) > 1:
+                        n_loaded = len(self.x_vals)
+                        start = getattr(self, 'loaded_start_trace', 0)
+                        end = getattr(self, 'loaded_end_trace', len(map_array))
+                        loaded_traces = np.linspace(start, end, n_loaded)
+                        screen_x = np.linspace(self.x_vals[0], self.x_vals[-1], n_loaded)
+                        
+                        if loaded_traces[0] > loaded_traces[-1]:
+                            x_plot = np.interp(x_indices, loaded_traces[::-1], screen_x[::-1])
+                        else:
+                            x_plot = np.interp(x_indices, loaded_traces, screen_x)
+                    elif map_array is not None:
+                        safe_indices = np.clip(x_indices, 0, len(map_array)-1)
+                        x_plot = map_array[safe_indices]
+                    else:
+                        x_plot = x_indices
+                    
+                    # Plot fault (slightly thicker or different style if needed, but 1.5 is good)
+                    ax.plot(x_plot, y_arr, color=f['color'], linewidth=1.5, linestyle='-', marker='.', markersize=2)
                     
             fig.savefig(file_path, dpi=dpi, bbox_inches='tight', metadata={'Creator': 'SeisPlotPy'})
             plt.close(fig)
@@ -1250,7 +1945,7 @@ class MainController:
                         # Flip indices because we searched the reversed array
                         n = len(self.active_header_map)
                         start_trace, end_trace = n - end_trace, n - start_trace
-                except:
+                except Exception:
                     # Fallback to simple scaling if search fails
                     start_trace = max(0, int(x_min))
                     end_trace = min(self.data_manager.n_traces, int(x_max))
@@ -1303,6 +1998,108 @@ class MainController:
         except Exception as e:
             QMessageBox.critical(self.view, "Attribute Error", str(e))
             self.view.update_status("Error calculating attribute")
+    
+    def handle_horizon_batch_export(self):
+        """Export all visible horizons to separate CSV files."""
+        if not self.data_manager:
+            QMessageBox.warning(self.view, "Error", "No seismic data loaded.")
+            return
+        visible = [(i,h) for i,h in enumerate(self.horizon_manager.horizons) if h.get('visible', True) and h['points']]
+        if not visible:
+            QMessageBox.warning(self.view, "Nothing to Export", "No visible horizons with points.")
+            return
+        export_dir = QFileDialog.getExistingDirectory(self.view, "Select Export Directory", self.get_last_export_dir())
+        if not export_dir:
+            return
+        self.save_last_export_dir(os.path.join(export_dir, "dummy.csv"))
+        dlg = HeaderExportDialog(self.data_manager.available_headers, self.view)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        selected_headers = dlg.get_selected_headers()
+        name_counts = {}
+        exported = 0
+        for idx, h in visible:
+            base = h['name']
+            if base in name_counts:
+                name_counts[base] += 1
+                fname = f"{base}_{name_counts[base]}.csv"
+            else:
+                name_counts[base] = 0
+                fname = f"{base}.csv"
+            path = os.path.join(export_dir, fname)
+            try:
+                self._export_horizon_to_file(h, path, selected_headers)
+                exported += 1
+            except Exception as e:
+                print(f"Failed to export {h['name']}: {e}")
+        QMessageBox.information(self.view, "Batch Export Complete", f"Exported {exported}/{len(visible)} horizons to:\n{export_dir}")
+
+    def handle_fault_batch_export(self):
+        """Export all visible faults to separate CSV files."""
+        if not self.data_manager:
+            QMessageBox.warning(self.view, "Error", "No seismic data loaded.")
+            return
+        visible = [(i,f) for i,f in enumerate(self.fault_manager.faults) if f.get('visible', True) and f['points']]
+        if not visible:
+            QMessageBox.warning(self.view, "Nothing to Export", "No visible faults with points.")
+            return
+        export_dir = QFileDialog.getExistingDirectory(self.view, "Select Export Directory", self.get_last_export_dir())
+        if not export_dir:
+            return
+        self.save_last_export_dir(os.path.join(export_dir, "dummy.csv"))
+        dlg = HeaderExportDialog(self.data_manager.available_headers, self.view)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        selected_headers = dlg.get_selected_headers()
+        name_counts = {}
+        exported = 0
+        for idx, f in visible:
+            base = f['name']
+            if base in name_counts:
+                name_counts[base] += 1
+                fname = f"{base}_{name_counts[base]}.csv"
+            else:
+                name_counts[base] = 0
+                fname = f"{base}.csv"
+            path = os.path.join(export_dir, fname)
+            try:
+                self._export_fault_to_file(f, path, selected_headers)
+                exported += 1
+            except Exception as e:
+                print(f"Failed to export {f['name']}: {e}")
+        QMessageBox.information(self.view, "Batch Export Complete", f"Exported {exported}/{len(visible)} faults to:\n{export_dir}")
+
+    def _export_horizon_to_file(self, horizon, path, selected_headers):
+        """Helper to export a single horizon to file."""
+        points = horizon['points']
+        x_vals, y_vals = zip(*points)
+        x_arr, y_arr = np.array(x_vals), np.array(y_vals)
+        df = pd.DataFrame()
+        df[self.view.combo_header.currentText()] = x_arr
+        df[self.view.combo_domain.currentText()] = y_arr
+        trace_indices = np.zeros(len(x_arr), dtype=int)
+        if self.view.combo_header.currentText() == "Trace Index":
+            trace_indices = np.round(x_arr).astype(int)
+        elif self.active_header_map is not None:
+            for i, val in enumerate(x_arr):
+                trace_indices[i] = (np.abs(self.active_header_map - val)).argmin()
+        for hdr in selected_headers:
+            full_hdr_vals = self.data_manager.get_header_slice(hdr, 0, self.data_manager.n_traces, 1)
+            df[hdr] = full_hdr_vals[trace_indices]
+        df.to_csv(path, index=False)
+
+    def _export_fault_to_file(self, fault, path, selected_headers):
+        """Helper to export a single fault to file."""
+        points = fault['points']
+        x_vals, y_vals = zip(*points)
+        x_arr, y_arr = np.array(x_vals), np.array(y_vals)
+        df = pd.DataFrame({"Trace": x_arr, "Time_Depth": y_arr})
+        trace_indices = x_arr.astype(int)
+        trace_indices = np.clip(trace_indices, 0, self.data_manager.n_traces - 1)
+        for hdr in selected_headers:
+            full_hdr_vals = self.data_manager.get_header_slice(hdr, 0, self.data_manager.n_traces, 1)
+            df[hdr] = full_hdr_vals[trace_indices]
+        df.to_csv(path, index=False)
     
     def publish_horizon_to_map(self, index):
         """Creates a QGIS vector layer for the selected horizon."""
@@ -1434,6 +2231,48 @@ class MainController:
             # 6. Update the label
             self.view.lbl_coords.setText(f"{x_label}: {x_val:.1f} | {domain}: {y_val:.1f} {unit}{world_str}")
     
+    def show_export_headers(self):
+        if not self.data_manager: return
+        dlg = HeaderExportDialog(self.data_manager.available_headers, self.view)
+        if dlg.exec() == QDialog.Accepted:
+            selected_headers = dlg.get_selected_headers()
+            if not selected_headers: return
+            
+            path, _ = QFileDialog.getSaveFileName(self.view, "Save Headers CSV", "", "CSV Files (*.csv)")
+            if path:
+                if not path.lower().endswith('.csv'): path += '.csv'
+                success, msg = self.data_manager.dump_headers_to_csv(path, selected_headers)
+                QMessageBox.information(self.view, "Export Result", msg)
+                
+    def show_patch_headers(self):
+        if not self.data_manager: return
+        dlg = HeaderPatchDialog(self.data_manager.available_headers, self.view)
+        if dlg.exec() == QDialog.Accepted:
+            csv_path, segy_path, mapping = dlg.get_inputs()
+            
+            # Progress Dialog
+            from qgis.PyQt.QtWidgets import QProgressDialog
+            progress = QProgressDialog("Patching Headers...", "Abort", 0, 100, self.view)
+            progress.setWindowModality(Qt.WindowModal)
+            
+            def update_prog(val):
+                progress.setValue(val)
+                if progress.wasCanceled(): raise Exception("Cancelled by user")
+            
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                success, msg = self.data_manager.patch_headers_from_csv(csv_path, segy_path, mapping, update_prog)
+                QApplication.restoreOverrideCursor()
+                progress.setValue(100)
+                
+                if success:
+                    QMessageBox.information(self.view, "Success", f"{msg}\n\nNew file saved to:\n{segy_path}")
+                else:
+                    QMessageBox.critical(self.view, "Error", msg)
+            except Exception as e:
+                QApplication.restoreOverrideCursor()
+                QMessageBox.warning(self.view, "Aborted", str(e))
+
     def show_header_explorer(self):
         if not self.data_manager:
             return
@@ -1441,7 +2280,7 @@ class MainController:
         self.header_explorer = HeaderExplorer(self.data_manager, self.view)
         self.header_explorer.show()
     
-    def export_data(self):
+    def export_data(self, text_header_override=None):
         """Opens the export dialog and handles the file creation."""
         # Safety check: Is a file actually loaded?
         if not self.data_manager or not self.data_manager.file_path:
@@ -1462,7 +2301,7 @@ class MainController:
             QApplication.processEvents() # Keeps the UI responsive
             
             # 3. Call the engine we built in Step 1
-            success, msg = self.data_manager.export_segy_subset(out_path, start, end)
+            success, msg = self.data_manager.export_segy_subset(out_path, start, end, text_header_override=text_header_override)
             
             # 4. Report back
             if success:
