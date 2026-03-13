@@ -2,20 +2,20 @@
 name=SeisPlotPy
 qgisMinimumVersion=3.16
 
-description=2D SEG-Y (post stack) data visualization, analysis, and horizon picking inside QGIS.
-about=SeisPlotPy is a modern seismic viewer and interpretation tool integrated directly into QGIS. It loads SEG-Y data using segyio, displays seismic profiles with pyqtgraph, links navigation to the QGIS map canvas, and provides tools for horizon picking, attribute computation, and export for further analysis.
+description=2D SEG-Y (post-stack) data visualization, analysis, and interpretation inside QGIS.
+about=SeisPlotPy is a modern seismic viewer and interpretation tool integrated directly into QGIS. It loads SEG-Y data using segyio, displays seismic profiles with pyqtgraph, links navigation to the QGIS map canvas, and provides tools for interpretation, attribute computation, header editing, and export for further analysis.
 
 version=0.9.9
 
 author=Arjun V H
 email=arjunvelliyidathu@gmail.com
 
-# Update these URLs after you create the GitHub repo:
+# GitHub repo:
 homepage=https://github.com/arjun-vh/SeisPlotPy-QGIS
 repository=https://github.com/arjun-vh/SeisPlotPy-QGIS
 tracker=https://github.com/arjun-vh/SeisPlotPy-QGIS/issues
 
-# How it appears in the plugin manager:
+# Plugin details:
 category=Raster
 icon=icon.png
 tags=seismic,segy,geophysics,subsurface,sub-bottom profiler,reflection

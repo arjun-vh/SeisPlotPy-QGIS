@@ -60,6 +60,8 @@ class MainController(QObject):
         self.fault_manager = FaultManager(None)
         self.fault_items = [] 
         
+        self.active_flatten_horizon_idx = None
+        
         # --- Navigation Attributes ---
         self.coord_tree = None      
         self.map_marker = None
@@ -116,6 +118,7 @@ class MainController(QObject):
         self.horizon_manager.export_requested.connect(self.handle_horizon_export)
         self.horizon_manager.publish_requested.connect(self.publish_horizon_to_map)
         self.horizon_manager.export_all_requested.connect(self.handle_horizon_batch_export)
+        self.horizon_manager.flatten_toggled.connect(self.handle_flatten_toggled)
         
         # Fault Signals
         self.fault_manager.picking_toggled.connect(self.set_fault_picking_mode)
@@ -879,6 +882,10 @@ class MainController(QObject):
                 self.fault_manager.delete_last_point()
 
     def set_picking_mode(self, active, horizon_name):
+        if active and self.active_flatten_horizon_idx is not None:
+            QMessageBox.warning(self.view, "Picking Disabled", "Horizon picking is disabled while in 'Flattened' mode to prevent coordinate corruption. Please unflatten the view to resume picking.")
+            self.horizon_manager.toggle_picking(False)
+            return
         self.is_picking_mode = active
         if active:
             self.view.plot_widget.setCursor(Qt.CrossCursor)
@@ -890,6 +897,10 @@ class MainController(QObject):
             self.view.update_status("Viewer Ready")
 
     def set_fault_picking_mode(self, active, fault_name):
+        if active and self.active_flatten_horizon_idx is not None:
+            QMessageBox.warning(self.view, "Picking Disabled", "Fault picking is disabled while in 'Flattened' mode to prevent coordinate corruption. Please unflatten the view to resume picking.")
+            self.fault_manager.toggle_picking(False)
+            return
         self.is_fault_picking_mode = active
         if active:
             self.view.plot_widget.setCursor(Qt.CrossCursor)
@@ -926,14 +937,16 @@ class MainController(QObject):
 
             # Map Trace Index -> X Coordinate matching the linearly stretched image
             if map_array is not None and getattr(self, 'x_vals', None) is not None and len(self.x_vals) > 1:
-                 start = getattr(self, 'loaded_start_trace', 0)
-                 end = getattr(self, 'loaded_end_trace', len(map_array))
-                 
-                 if end != start:
-                     slope = (self.x_vals[-1] - self.x_vals[0]) / (end - start)
-                     mapped_x = self.x_vals[0] + (idx_arr - start) * slope
-                 else:
-                     mapped_x = np.full_like(idx_arr, self.x_vals[0], dtype=float)
+                n_loaded = len(self.x_vals)
+                start = getattr(self, 'loaded_start_trace', 0)
+                end = getattr(self, 'loaded_end_trace', len(map_array))
+                loaded_traces = np.linspace(start, end, n_loaded)
+                screen_x = np.linspace(self.x_vals[0], self.x_vals[-1], n_loaded)
+                
+                if loaded_traces[0] > loaded_traces[-1]:
+                    mapped_x = np.interp(idx_arr, loaded_traces[::-1], screen_x[::-1])
+                else:
+                    mapped_x = np.interp(idx_arr, loaded_traces, screen_x)
             elif map_array is not None:
                  # Fallback if x_vals isn't available
                  mapped_x = []
@@ -1360,6 +1373,8 @@ class MainController(QObject):
         
         try:
             self.data_manager = SeismicDataManager(path)
+            # Reset coordinate step to full resolution for new file load
+            self.coord_step = 1
             self.full_cum_dist = None; self.dist_unit = "m"
             
             self.action_text_header.setEnabled(True); self.action_header_qc.setEnabled(True)
@@ -1510,7 +1525,7 @@ class MainController(QObject):
         self.is_programmatic_update = True
         self.view.spin_x_min.setValue(x_min); self.view.spin_x_max.setValue(x_max)
         self.is_programmatic_update = False
-        self.update_labels(); self.draw_horizons()
+        self.update_labels(); self.draw_horizons(); self.draw_faults()
 
     def apply_changes(self):
         if not self.data_manager: return
@@ -1547,10 +1562,59 @@ class MainController(QObject):
             self.loaded_start_trace = max(0, start); self.loaded_end_trace = min(self.data_manager.n_traces, end)
             if self.loaded_start_trace >= self.loaded_end_trace: return
             self.current_data = self.data_manager.get_data_slice(self.loaded_start_trace, self.loaded_end_trace, step)
+            self.t_vals = self.data_manager.time_axis
+            
             header = self.view.combo_header.currentText()
             if header == "Trace Index": self.x_vals = np.arange(self.loaded_start_trace, self.loaded_end_trace, step)
             else: self.x_vals = self.get_scaled_header(header, self.loaded_start_trace, self.loaded_end_trace, step)
-            self.t_vals = self.data_manager.time_axis
+            
+            # --- FLATTENING ENGINE ---
+            if self.active_flatten_horizon_idx is not None and self.active_flatten_horizon_idx < len(self.horizon_manager.horizons):
+                h = self.horizon_manager.horizons[self.active_flatten_horizon_idx]
+                if h['points']:
+                    h_x, h_y = zip(*h['points'])
+                    h_x = np.array(h_x, dtype=int)
+                    h_y = np.array(h_y)
+                    
+                    # 1. Establish the Reference Time (Mean depth of horizon)
+                    self.flatten_reference_time = np.mean(h_y)
+                    
+                    # 2. Get true trace indices of the loaded slice
+                    loaded_traces = np.arange(self.loaded_start_trace, self.loaded_end_trace, step)
+                    
+                    # 3. Interpolate the horizon Y value for every loaded trace
+                    if len(h_x) > 1:
+                        target_y = np.interp(loaded_traces, h_x, h_y)
+                    else:
+                        target_y = np.full_like(loaded_traces, h_y[0])
+                        
+                    # 4. Calculate shift in true units (ms/m)
+                    shift_units = self.flatten_reference_time - target_y
+                    
+                    # 5. Convert shift to exact integer samples
+                    sample_rate = self.data_manager.sample_rate
+                    shift_samples = np.round(shift_units / sample_rate).astype(int)
+                    
+                    # 6. Apply rapid column-wise pad/slice shifting utilizing numpy roll with mask
+                    flattened_data = np.zeros_like(self.current_data)
+                    for i in range(self.current_data.shape[1]):
+                        shift = shift_samples[i]
+                        trace = self.current_data[:, i]
+                        if shift > 0:
+                            # Shift down, pad top
+                            flattened_data[shift:, i] = trace[:-shift]
+                        elif shift < 0:
+                            # Shift up, pad bottom
+                            flattened_data[:shift, i] = trace[-shift:]
+                        else:
+                            flattened_data[:, i] = trace
+                    self.current_data = flattened_data
+                else:
+                    self.flatten_reference_time = None
+            else:
+                self.flatten_reference_time = None
+            # --------------------------
+            
             x_min = self.x_vals[0] if self.x_vals.size > 0 else 0; x_max = self.x_vals[-1] if self.x_vals.size > 0 else 1
             t_min = self.t_vals[0]; t_max = self.t_vals[-1]
             self.is_programmatic_update = True
@@ -1558,7 +1622,7 @@ class MainController(QObject):
             if not self.view.chk_manual_step.isChecked(): self.view.spin_step.setValue(step)
             if auto_fit:
                 self.view.plot_widget.autoRange(); self.view.spin_x_min.setValue(x_min); self.view.spin_x_max.setValue(x_max); self.view.spin_y_min.setValue(t_min); self.view.spin_y_max.setValue(t_max)
-            self.update_contrast(); self.update_labels(); self.draw_horizons(); self.is_programmatic_update = False
+            self.update_contrast(); self.update_labels(); self.draw_horizons(); self.draw_faults(); self.is_programmatic_update = False
         except Exception as e: print(f"Load error: {e}"); self.is_programmatic_update = False
 
     def sync_view_to_controls(self, _, ranges):
@@ -1583,6 +1647,20 @@ class MainController(QObject):
         self.view.plot_widget.update()
 
     def change_colormap(self, text): self.view.set_colormap(text)
+    def handle_flatten_toggled(self, index, state):
+        if state:
+            self.active_flatten_horizon_idx = index
+            # DISABLE ALL PICKING
+            if self.is_picking_mode: self.horizon_manager.toggle_picking(False)
+            if self.is_fault_picking_mode: self.fault_manager.toggle_picking(False)
+            QMessageBox.warning(self.view, "Interpretation Disabled", "Interpretation picking is disabled while in 'Flattened' mode to prevent coordinate corruption. Please unflatten the view to resume picking.")
+        else:
+            if self.active_flatten_horizon_idx == index:
+                self.active_flatten_horizon_idx = None
+        
+        # Trigger full data reload to warp/unwarp
+        self.apply_changes()
+
     def draw_horizons(self):
         for item in self.horizon_items: self.view.plot_widget.removeItem(item)
         self.horizon_items = []
@@ -1594,6 +1672,25 @@ class MainController(QObject):
         for h in self.horizon_manager.horizons:
             if not h['visible'] or not h['points']: continue
             idx_data, y_data = zip(*h['points']); idx_arr = np.array(idx_data, dtype=int); y_arr = np.array(y_data)
+            
+            # --- FLATTEN WARP LOGIC (Y-AXIS) ---
+            if self.active_flatten_horizon_idx is not None and getattr(self, 'flatten_reference_time', None) is not None:
+                flat_h = self.horizon_manager.horizons[self.active_flatten_horizon_idx]
+                if flat_h['points']:
+                    flat_x, flat_y = zip(*flat_h['points'])
+                    flat_x = np.array(flat_x, dtype=int); flat_y = np.array(flat_y)
+                    # Interpolate the flattening horizon's depth at the specific trace indices of this horizon
+                    if len(flat_x) > 1:
+                        target_y = np.interp(idx_arr, flat_x, flat_y)
+                    else:
+                        target_y = np.full_like(idx_arr, flat_y[0])
+                    shift_ms = self.flatten_reference_time - target_y
+                    visual_y = y_arr + shift_ms
+                else:
+                    visual_y = y_arr
+            else:
+                visual_y = y_arr
+            # -----------------------------------
             
             # Option A: Interpolate mapped coordinates to match linearly stretched ImageItem
             if map_array is not None and getattr(self, 'x_vals', None) is not None and len(self.x_vals) > 1:
@@ -1612,8 +1709,8 @@ class MainController(QObject):
             else: 
                 x_arr = idx_arr
                 
-            curve = pg.PlotCurveItem(x=x_arr, y=y_arr, pen=pg.mkPen(color=h['color'], width=2)); self.view.plot_widget.addItem(curve); self.horizon_items.append(curve)
-            scatter = pg.ScatterPlotItem(x=x_arr, y=y_arr, size=5, brush=h['color'], pen=None); self.view.plot_widget.addItem(scatter); self.horizon_items.append(scatter)
+            curve = pg.PlotCurveItem(x=x_arr, y=visual_y, pen=pg.mkPen(color=h['color'], width=2)); self.view.plot_widget.addItem(curve); self.horizon_items.append(curve)
+            scatter = pg.ScatterPlotItem(x=x_arr, y=visual_y, size=5, brush=h['color'], pen=None); self.view.plot_widget.addItem(scatter); self.horizon_items.append(scatter)
     def setup_menu(self):
         menu_bar = self.view.menuBar()
         file_menu = menu_bar.addMenu("File")
@@ -1857,6 +1954,24 @@ class MainController(QObject):
                     x_indices = np.array(raw_indices, dtype=int)
                     y_arr = np.array(y_vals)
 
+                    # --- FLATTEN WARP LOGIC (Y-AXIS) ---
+                    if self.active_flatten_horizon_idx is not None and getattr(self, 'flatten_reference_time', None) is not None:
+                        flat_h = self.horizon_manager.horizons[self.active_flatten_horizon_idx]
+                        if flat_h['points']:
+                            flat_x, flat_y = zip(*flat_h['points'])
+                            flat_x = np.array(flat_x, dtype=int); flat_y = np.array(flat_y)
+                            if len(flat_x) > 1:
+                                target_y = np.interp(x_indices, flat_x, flat_y)
+                            else:
+                                target_y = np.full_like(x_indices, flat_y[0])
+                            shift_ms = self.flatten_reference_time - target_y
+                            visual_y = y_arr + shift_ms
+                        else:
+                            visual_y = y_arr
+                    else:
+                        visual_y = y_arr
+                    # -----------------------------------
+
                     # ---FIX: Map Indices to Current X-Axis Domain ---
                     if map_array is not None and getattr(self, 'x_vals', None) is not None and len(self.x_vals) > 1:
                         n_loaded = len(self.x_vals)
@@ -1876,7 +1991,7 @@ class MainController(QObject):
                     else:
                         x_plot = x_indices # Just use trace index
                     
-                    ax.plot(x_plot, y_arr, color=h['color'], linewidth=1.0)
+                    ax.plot(x_plot, visual_y, color=h['color'], linewidth=1.0)
 
             # 3. Draw Faults with COORDINATE MAPPING
             for f in self.fault_manager.faults:
@@ -1886,6 +2001,24 @@ class MainController(QObject):
                     raw_indices, y_vals = zip(*f['points'])
                     x_indices = np.array(raw_indices, dtype=int)
                     y_arr = np.array(y_vals)
+
+                    # --- FLATTEN WARP LOGIC (Y-AXIS) ---
+                    if self.active_flatten_horizon_idx is not None and getattr(self, 'flatten_reference_time', None) is not None:
+                        flat_h = self.horizon_manager.horizons[self.active_flatten_horizon_idx]
+                        if flat_h['points']:
+                            flat_x, flat_y = zip(*flat_h['points'])
+                            flat_x = np.array(flat_x, dtype=int); flat_y = np.array(flat_y)
+                            if len(flat_x) > 1:
+                                target_y = np.interp(x_indices, flat_x, flat_y)
+                            else:
+                                target_y = np.full_like(x_indices, flat_y[0])
+                            shift_ms = self.flatten_reference_time - target_y
+                            visual_y = y_arr + shift_ms
+                        else:
+                            visual_y = y_arr
+                    else:
+                        visual_y = y_arr
+                    # -----------------------------------
 
                     # Map Indices to Current X-Axis Domain
                     if map_array is not None and getattr(self, 'x_vals', None) is not None and len(self.x_vals) > 1:
@@ -1906,7 +2039,7 @@ class MainController(QObject):
                         x_plot = x_indices
                     
                     # Plot fault (slightly thicker or different style if needed, but 1.5 is good)
-                    ax.plot(x_plot, y_arr, color=f['color'], linewidth=1.5, linestyle='-', marker='.', markersize=2)
+                    ax.plot(x_plot, visual_y, color=f['color'], linewidth=1.5, linestyle='-', marker='.', markersize=2)
                     
             fig.savefig(file_path, dpi=dpi, bbox_inches='tight', metadata={'Creator': 'SeisPlotPy'})
             plt.close(fig)
