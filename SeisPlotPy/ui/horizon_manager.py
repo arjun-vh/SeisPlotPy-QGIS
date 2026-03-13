@@ -15,6 +15,7 @@ class HorizonManager(QDialog):
     export_requested = pyqtSignal(int)
     publish_requested = pyqtSignal(int) # Signal for "Map" button
     export_all_requested = pyqtSignal()  # Signal for batch export
+    flatten_toggled = pyqtSignal(int, bool)  # Signal for flatten: (horizon_index, is_active)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -38,17 +39,18 @@ class HorizonManager(QDialog):
         
         # Table
         self.table = QTableWidget()
-        # Increased columns to 6 to add "Vis" (Visibility)
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["Active", "Vis", "Name", "Color", "Points", "Actions"])
+        # Increased columns to 7 to add "Flatten" alongside Actions
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["Active", "Vis", "Name", "Color", "Points", "Flat", "Actions"])
         
         # Column Resizing
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # Name stretches
         self.table.setColumnWidth(0, 50) # Active radio
         self.table.setColumnWidth(1, 40) # Vis checkbox
         self.table.setColumnWidth(3, 50) # Color
-        self.table.setColumnWidth(4, 60) # Points
-        self.table.setColumnWidth(5, 80) # Actions
+        self.table.setColumnWidth(4, 50) # Points
+        self.table.setColumnWidth(5, 45) # Flat
+        self.table.setColumnWidth(6, 80) # Actions
         
         # --- CRITICAL FIX: Connect item changed signal to save Name edits ---
         self.table.itemChanged.connect(self.on_item_changed)
@@ -84,7 +86,7 @@ class HorizonManager(QDialog):
         count = len(self.horizons) + 1
         colors = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#00FFFF', '#FF00FF']
         color = colors[len(self.horizons) % len(colors)]
-        self.horizons.append({'name': f"Horizon_{count}", 'color': color, 'points': [], 'visible': True})
+        self.horizons.append({'name': f"Horizon_{count}", 'color': color, 'points': [], 'visible': True, 'flattened': False})
         self.refresh_table(); self.set_active_horizon(len(self.horizons)-1)
 
     def import_horizon(self):
@@ -96,7 +98,7 @@ class HorizonManager(QDialog):
             name = os.path.basename(file_path).split('.')[0]
             colors = ['#FF0000', '#00FF00', '#0000FF']
             color = colors[len(self.horizons) % len(colors)]
-            self.horizons.append({'name': name, 'color': color, 'points': points, 'visible': True})
+            self.horizons.append({'name': name, 'color': color, 'points': points, 'visible': True, 'flattened': False})
             self.refresh_table(); self.horizon_visibility_changed.emit()
         except Exception as e: QMessageBox.critical(self, "Error", str(e))
 
@@ -115,67 +117,93 @@ class HorizonManager(QDialog):
     def refresh_table(self):
         # Block signals to prevent 'on_item_changed' from firing while we build the table
         self.table.blockSignals(True)
-        self.table.setRowCount(len(self.horizons))
-        
-        for btn in self.pick_group.buttons(): self.pick_group.removeButton(btn)
-        
-        for i, h in enumerate(self.horizons):
-            # 0. Active Radio Button
-            rb = QRadioButton(); rb.setChecked(i == self.active_horizon_index)
-            rb.toggled.connect(lambda c, idx=i: self.set_active_horizon(idx) if c else None)
-            self.pick_group.addButton(rb)
-            w_rb = QWidget(); l = QHBoxLayout(w_rb); l.addWidget(rb); l.setAlignment(Qt.AlignCenter); l.setContentsMargins(0,0,0,0)
-            self.table.setCellWidget(i, 0, w_rb)
+        try:
+            self.table.setRowCount(len(self.horizons))
             
-            # 1. NEW: Visibility Checkbox
-            chk_vis = QCheckBox()
-            chk_vis.setChecked(h.get('visible', True))
-            # Connect toggle to data update
-            chk_vis.toggled.connect(lambda c, idx=i: self.toggle_horizon_vis(idx, c))
-            w_vis = QWidget(); l2 = QHBoxLayout(w_vis); l2.addWidget(chk_vis); l2.setAlignment(Qt.AlignCenter); l2.setContentsMargins(0,0,0,0)
-            self.table.setCellWidget(i, 1, w_vis)
+            # Create new button group instead of manually removing (safer cleanup)
+            self.pick_group = QButtonGroup(self)
+            
+            for i, h in enumerate(self.horizons):
+                # 0. Active Radio Button
+                rb = QRadioButton(); rb.setChecked(i == self.active_horizon_index)
+                rb.toggled.connect(lambda c, idx=i: self.set_active_horizon(idx) if c else None)
+                self.pick_group.addButton(rb)
+                w_rb = QWidget(); l = QHBoxLayout(w_rb); l.addWidget(rb); l.setAlignment(Qt.AlignCenter); l.setContentsMargins(0,0,0,0)
+                self.table.setCellWidget(i, 0, w_rb)
+                
+                # 1. NEW: Visibility Checkbox
+                chk_vis = QCheckBox()
+                chk_vis.setChecked(h.get('visible', True))
+                # Connect toggle to data update
+                chk_vis.toggled.connect(lambda c, idx=i: self.toggle_horizon_vis(idx, c))
+                w_vis = QWidget(); l2 = QHBoxLayout(w_vis); l2.addWidget(chk_vis); l2.setAlignment(Qt.AlignCenter); l2.setContentsMargins(0,0,0,0)
+                self.table.setCellWidget(i, 1, w_vis)
 
-            # 2. Name
-            self.table.setItem(i, 2, QTableWidgetItem(h['name']))
+                # 2. Name
+                self.table.setItem(i, 2, QTableWidgetItem(h['name']))
+                
+                # 3. Color
+                btn_col = QPushButton(); btn_col.setStyleSheet(f"background-color: {h['color']}; border: none;")
+                btn_col.clicked.connect(lambda _, idx=i: self.change_color(idx))
+                self.table.setCellWidget(i, 3, btn_col)
+                
+                # 4. Point Count
+                item_pts = QTableWidgetItem(str(len(h['points'])))
+                item_pts.setFlags(item_pts.flags() ^ Qt.ItemIsEditable) 
+                self.table.setItem(i, 4, item_pts)
+                
+                # 5. Flatten Button
+                btn_flat = QPushButton("Flat")
+                btn_flat.setCheckable(True)
+                is_flat = h.get('flattened', False)
+                btn_flat.setChecked(is_flat)
+                if is_flat:
+                    btn_flat.setStyleSheet("background-color: #ffd700; border: 1px solid #aaa; border-radius: 3px; font-size: 10px; font-weight: bold;")
+                else:
+                    btn_flat.setStyleSheet("background-color: #f0f0f0; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
+                btn_flat.setFixedWidth(35)
+                btn_flat.toggled.connect(lambda c, idx=i: self.toggle_flatten(idx, c))
+                self.table.setCellWidget(i, 5, btn_flat)
+                
+                # 6. Actions (Map + Delete)
+                action_widget = QWidget()
+                action_layout = QHBoxLayout(action_widget)
+                action_layout.setContentsMargins(2, 2, 2, 2)
+                action_layout.setSpacing(4)
+                
+                btn_map = QPushButton("Map")
+                btn_map.setToolTip("Publish horizon as a layer to QGIS Map Canvas")
+                btn_map.setStyleSheet("background-color: #e6ffe6; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
+                btn_map.setFixedWidth(40)
+                btn_map.clicked.connect(lambda _, idx=i: self.publish_requested.emit(idx))
+                
+                btn_del = QPushButton("X")
+                btn_del.setToolTip("Delete Horizon")
+                btn_del.setStyleSheet("background-color: #ffcccc; color: red; font-weight: bold; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
+                btn_del.setFixedWidth(25)
+                btn_del.clicked.connect(lambda _, idx=i: self.delete_horizon(idx))
+                
+                action_layout.addWidget(btn_map)
+                action_layout.addWidget(btn_del)
+                self.table.setCellWidget(i, 6, action_widget)
             
-            # 3. Color
-            btn_col = QPushButton(); btn_col.setStyleSheet(f"background-color: {h['color']}; border: none;")
-            btn_col.clicked.connect(lambda _, idx=i: self.change_color(idx))
-            self.table.setCellWidget(i, 3, btn_col)
-            
-            # 4. Point Count
-            item_pts = QTableWidgetItem(str(len(h['points'])))
-            item_pts.setFlags(item_pts.flags() ^ Qt.ItemIsEditable) 
-            self.table.setItem(i, 4, item_pts)
-            
-            # 5. Actions (Map + Delete)
-            action_widget = QWidget()
-            action_layout = QHBoxLayout(action_widget)
-            action_layout.setContentsMargins(2, 2, 2, 2)
-            action_layout.setSpacing(4)
-            
-            btn_map = QPushButton("Map")
-            btn_map.setToolTip("Publish horizon as a layer to QGIS Map Canvas")
-            btn_map.setStyleSheet("background-color: #e6ffe6; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
-            btn_map.setFixedWidth(40)
-            btn_map.clicked.connect(lambda _, idx=i: self.publish_requested.emit(idx))
-            
-            btn_del = QPushButton("X")
-            btn_del.setToolTip("Delete Horizon")
-            btn_del.setStyleSheet("background-color: #ffcccc; color: red; font-weight: bold; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
-            btn_del.setFixedWidth(25)
-            btn_del.clicked.connect(lambda _, idx=i: self.delete_horizon(idx))
-            
-            action_layout.addWidget(btn_map)
-            action_layout.addWidget(btn_del)
-            self.table.setCellWidget(i, 5, action_widget)
-            
-        self.btn_pick.setEnabled(len(self.horizons) > 0)
-        self.table.blockSignals(False)
+            self.btn_pick.setEnabled(len(self.horizons) > 0)
+        finally:
+            self.table.blockSignals(False)
 
     def toggle_horizon_vis(self, index, state):
         self.horizons[index]['visible'] = state
         self.horizon_visibility_changed.emit()
+
+    def toggle_flatten(self, index, state):
+        # Enforce radio-behavior (only one flat at a time)
+        for i, h in enumerate(self.horizons):
+            if i == index:
+                h['flattened'] = state
+            else:
+                h['flattened'] = False
+        self.refresh_table()
+        self.flatten_toggled.emit(index, state)
 
     def set_active_horizon(self, index):
         self.active_horizon_index = index

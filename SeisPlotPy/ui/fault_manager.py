@@ -110,62 +110,65 @@ class FaultManager(QDialog):
 
     def refresh_table(self):
         self.table.blockSignals(True)
-        self.table.setRowCount(len(self.faults))
-        
-        for btn in self.pick_group.buttons(): self.pick_group.removeButton(btn)
-        
-        for i, f in enumerate(self.faults):
-            # 0. Active
-            rb = QRadioButton(); rb.setChecked(i == self.active_fault_index)
-            rb.toggled.connect(lambda c, idx=i: self.set_active_fault(idx) if c else None)
-            self.pick_group.addButton(rb)
-            w_rb = QWidget(); l = QHBoxLayout(w_rb); l.addWidget(rb); l.setAlignment(Qt.AlignCenter); l.setContentsMargins(0,0,0,0)
-            self.table.setCellWidget(i, 0, w_rb)
+        try:
+            self.table.setRowCount(len(self.faults))
             
-            # 1. Vis
-            chk_vis = QCheckBox()
-            chk_vis.setChecked(f.get('visible', True))
-            chk_vis.toggled.connect(lambda c, idx=i: self.toggle_fault_vis(idx, c))
-            w_vis = QWidget(); l2 = QHBoxLayout(w_vis); l2.addWidget(chk_vis); l2.setAlignment(Qt.AlignCenter); l2.setContentsMargins(0,0,0,0)
-            self.table.setCellWidget(i, 1, w_vis)
+            # Create new button group instead of manually removing (safer cleanup)
+            self.pick_group = QButtonGroup(self)
+            
+            for i, f in enumerate(self.faults):
+                # 0. Active
+                rb = QRadioButton(); rb.setChecked(i == self.active_fault_index)
+                rb.toggled.connect(lambda c, idx=i: self.set_active_fault(idx) if c else None)
+                self.pick_group.addButton(rb)
+                w_rb = QWidget(); l = QHBoxLayout(w_rb); l.addWidget(rb); l.setAlignment(Qt.AlignCenter); l.setContentsMargins(0,0,0,0)
+                self.table.setCellWidget(i, 0, w_rb)
+                
+                # 1. Vis
+                chk_vis = QCheckBox()
+                chk_vis.setChecked(f.get('visible', True))
+                chk_vis.toggled.connect(lambda c, idx=i: self.toggle_fault_vis(idx, c))
+                w_vis = QWidget(); l2 = QHBoxLayout(w_vis); l2.addWidget(chk_vis); l2.setAlignment(Qt.AlignCenter); l2.setContentsMargins(0,0,0,0)
+                self.table.setCellWidget(i, 1, w_vis)
 
-            # 2. Name
-            self.table.setItem(i, 2, QTableWidgetItem(f['name']))
+                # 2. Name
+                self.table.setItem(i, 2, QTableWidgetItem(f['name']))
+                
+                # 3. Color
+                btn_col = QPushButton(); btn_col.setStyleSheet(f"background-color: {f['color']}; border: none;")
+                btn_col.clicked.connect(lambda _, idx=i: self.change_color(idx))
+                self.table.setCellWidget(i, 3, btn_col)
+                
+                # 4. Points
+                item_pts = QTableWidgetItem(str(len(f['points'])))
+                item_pts.setFlags(item_pts.flags() ^ Qt.ItemIsEditable) 
+                self.table.setItem(i, 4, item_pts)
+                
+                # 5. Actions
+                action_widget = QWidget()
+                action_layout = QHBoxLayout(action_widget)
+                action_layout.setContentsMargins(2, 2, 2, 2)
+                action_layout.setSpacing(4)
+                
+                btn_map = QPushButton("Map")
+                btn_map.setToolTip("Publish fault to QGIS")
+                btn_map.setStyleSheet("background-color: #e6ffe6; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
+                btn_map.setFixedWidth(40)
+                btn_map.clicked.connect(lambda _, idx=i: self.publish_requested.emit(idx))
+                
+                btn_del = QPushButton("X")
+                btn_del.setToolTip("Delete Fault")
+                btn_del.setStyleSheet("background-color: #ffcccc; color: red; font-weight: bold; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
+                btn_del.setFixedWidth(25)
+                btn_del.clicked.connect(lambda _, idx=i: self.delete_fault(idx))
+                
+                action_layout.addWidget(btn_map)
+                action_layout.addWidget(btn_del)
+                self.table.setCellWidget(i, 5, action_widget)
             
-            # 3. Color
-            btn_col = QPushButton(); btn_col.setStyleSheet(f"background-color: {f['color']}; border: none;")
-            btn_col.clicked.connect(lambda _, idx=i: self.change_color(idx))
-            self.table.setCellWidget(i, 3, btn_col)
-            
-            # 4. Points
-            item_pts = QTableWidgetItem(str(len(f['points'])))
-            item_pts.setFlags(item_pts.flags() ^ Qt.ItemIsEditable) 
-            self.table.setItem(i, 4, item_pts)
-            
-            # 5. Actions
-            action_widget = QWidget()
-            action_layout = QHBoxLayout(action_widget)
-            action_layout.setContentsMargins(2, 2, 2, 2)
-            action_layout.setSpacing(4)
-            
-            btn_map = QPushButton("Map")
-            btn_map.setToolTip("Publish fault to QGIS")
-            btn_map.setStyleSheet("background-color: #e6ffe6; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
-            btn_map.setFixedWidth(40)
-            btn_map.clicked.connect(lambda _, idx=i: self.publish_requested.emit(idx))
-            
-            btn_del = QPushButton("X")
-            btn_del.setToolTip("Delete Fault")
-            btn_del.setStyleSheet("background-color: #ffcccc; color: red; font-weight: bold; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
-            btn_del.setFixedWidth(25)
-            btn_del.clicked.connect(lambda _, idx=i: self.delete_fault(idx))
-            
-            action_layout.addWidget(btn_map)
-            action_layout.addWidget(btn_del)
-            self.table.setCellWidget(i, 5, action_widget)
-            
-        self.btn_pick.setEnabled(len(self.faults) > 0)
-        self.table.blockSignals(False)
+            self.btn_pick.setEnabled(len(self.faults) > 0)
+        finally:
+            self.table.blockSignals(False)
 
     def toggle_fault_vis(self, index, state):
         self.faults[index]['visible'] = state
@@ -201,7 +204,17 @@ class FaultManager(QDialog):
         
         self.fault_visibility_changed.emit()
 
-
+    def delete_last_point(self):
+        """Delete the last point from the active fault (called on right-click)."""
+        if self.active_fault_index == -1: return
+        points = self.faults[self.active_fault_index]['points']
+        if points:
+            del points[-1]
+            count = len(points)
+            item = QTableWidgetItem(str(count))
+            item.setFlags(item.flags() ^ Qt.ItemIsEditable)
+            self.table.setItem(self.active_fault_index, 4, item)
+            self.fault_visibility_changed.emit()
 
     def change_color(self, index):
         col = QColorDialog.getColor(QColor(self.faults[index]['color']), self)
