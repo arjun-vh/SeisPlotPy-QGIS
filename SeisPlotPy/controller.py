@@ -1456,53 +1456,6 @@ class MainController(QObject):
             QMessageBox.information(self.view, "Success", f"Saved horizon with {len(selected_headers)} extra headers.")
         except Exception as e: QMessageBox.critical(self.view, "Export Error", str(e))
 
-    def handle_horizon_batch_export(self):
-        if not self.data_manager: QMessageBox.warning(self.view, "Error", "No seismic data loaded."); return
-        visible_horizons = [h for h in self.horizon_manager.horizons if h.get('visible', True) and h['points']]
-        if not visible_horizons: QMessageBox.warning(self.view, "Error", "No visible horizons with points to export."); return
-        
-        dlg = HeaderExportDialog(self.data_manager.available_headers, self.view)
-        if dlg.exec() != QDialog.Accepted: return
-        selected_headers = dlg.get_selected_headers()
-        
-        start_dir = self.get_last_export_dir()
-        dir_path = QFileDialog.getExistingDirectory(self.view, "Select Directory to Save Horizons", start_dir)
-        if not dir_path: return
-        self.save_last_export_dir(dir_path)
-        
-        success_count = 0
-        try:
-            current_x_mode = self.view.combo_header.currentText()
-            current_y_mode = self.view.combo_domain.currentText()
-            
-            for h in visible_horizons:
-                x_vals, y_vals = zip(*h['points'])
-                trace_indices = np.array(x_vals, dtype=int)
-                y_arr = np.array(y_vals)
-                
-                mapped_x = trace_indices
-                if self.active_header_map is not None:
-                    safe_indices = np.clip(trace_indices, 0, len(self.active_header_map)-1)
-                    mapped_x = self.active_header_map[safe_indices]
-                    
-                df = pd.DataFrame()
-                df["Trace Index"] = trace_indices
-                df[current_y_mode] = y_arr
-                if current_x_mode != "Trace Index":
-                    df[current_x_mode] = mapped_x
-                
-                trace_indices_clipped = np.clip(trace_indices, 0, self.data_manager.n_traces - 1)
-                for hdr in selected_headers:
-                    full_hdr_vals = self.data_manager.get_header_slice(hdr, 0, self.data_manager.n_traces, 1)
-                    df[hdr] = full_hdr_vals[trace_indices_clipped]
-                    
-                safe_name = "".join([c for c in h['name'] if c.isalpha() or c.isdigit() or c==' ' or c=='_']).rstrip()
-                file_path = os.path.join(dir_path, f"{safe_name}.csv")
-                df.to_csv(file_path, index=False)
-                success_count += 1
-                
-            QMessageBox.information(self.view, "Success", f"Successfully exported {success_count} horizons.")
-        except Exception as e: QMessageBox.critical(self.view, "Export Error", str(e))
 
     def on_header_changed(self):
         if not self.data_manager: return
@@ -2205,20 +2158,33 @@ class MainController(QObject):
     def _export_horizon_to_file(self, horizon, path, selected_headers):
         """Helper to export a single horizon to file."""
         points = horizon['points']
+        if not points:
+            return
+            
         x_vals, y_vals = zip(*points)
-        x_arr, y_arr = np.array(x_vals), np.array(y_vals)
+        trace_indices = np.array(x_vals, dtype=int)
+        y_arr = np.array(y_vals)
+        
+        current_x_mode = self.view.combo_header.currentText()
+        current_y_mode = self.view.combo_domain.currentText()
+        
+        mapped_x = trace_indices
+        if getattr(self, 'active_header_map', None) is not None:
+            safe_indices = np.clip(trace_indices, 0, len(self.active_header_map)-1)
+            mapped_x = self.active_header_map[safe_indices]
+            
         df = pd.DataFrame()
-        df[self.view.combo_header.currentText()] = x_arr
-        df[self.view.combo_domain.currentText()] = y_arr
-        trace_indices = np.zeros(len(x_arr), dtype=int)
-        if self.view.combo_header.currentText() == "Trace Index":
-            trace_indices = np.round(x_arr).astype(int)
-        elif self.active_header_map is not None:
-            for i, val in enumerate(x_arr):
-                trace_indices[i] = (np.abs(self.active_header_map - val)).argmin()
+        df["Trace Index"] = trace_indices
+        df[current_y_mode] = y_arr
+        if current_x_mode != "Trace Index":
+            df[current_x_mode] = mapped_x
+            
+        # --- Safe Header Extraction ---
+        trace_indices_clipped = np.clip(trace_indices, 0, self.data_manager.n_traces - 1)
         for hdr in selected_headers:
             full_hdr_vals = self.data_manager.get_header_slice(hdr, 0, self.data_manager.n_traces, 1)
-            df[hdr] = full_hdr_vals[trace_indices]
+            df[hdr] = full_hdr_vals[trace_indices_clipped]
+            
         df.to_csv(path, index=False)
 
     def _export_fault_to_file(self, fault, path, selected_headers):
