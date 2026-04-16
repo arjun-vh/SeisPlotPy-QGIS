@@ -73,7 +73,7 @@ Then enable it under:
 
 1. **Launch the Plugin:** Click the SeisPlotPy icon in the QGIS toolbar.
 2. **Load Data:** Click **Load SEG-Y** and select your file. The tool will automatically parse the headers and render the first subset of traces.
-3. **Map the Line:** Go to **Tools > Setup Geometry / Distance**. Select your X/Y coordinate headers (e.g., `CDP_X`, `CDP_Y`) and your desired Coordinate Reference System (CRS). The plugin will calculate cumulative distance and draw the seismic line on your QGIS map canvas.
+3. **Map the Line:** Go to **Tools > Setup Geometry / Distance**. Select your X/Y coordinate headers (e.g., `CDP_X`, `CDP_Y`) and the Coordinate Reference System (CRS). The plugin will calculate cumulative distance and draw the seismic line on your QGIS map canvas.
 4. **Navigate:** Use the SeisPlotPy map tool in QGIS to hover over the line and see the corresponding trace in the viewer. 
 5. **Interpret:** Open **Tools > Horizon Manager**, add a new horizon, toggle "Pick," and left-click on the seismic plot to start mapping reflectors.
 
