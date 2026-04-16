@@ -1,6 +1,6 @@
 # SeisPlotPy - QGIS Plugin
 
-SeisPlotPy is an advanced, open-source QGIS plugin designed for the visualization, navigation, and interpretation of SEG-Y seismic data directly within QGIS environment. 
+SeisPlotPy is an advanced, open-source QGIS plugin designed for the visualization, navigation, and interpretation of 2D SEG-Y seismic data directly within QGIS environment. 
 
 By bridging the gap between high-performance geophysical data arrays and spatial mapping, SeisPlotPy allows geoscientists to dynamically link seismic traces to real-world coordinates, pick horizons, and apply real-time signal processing.
 
