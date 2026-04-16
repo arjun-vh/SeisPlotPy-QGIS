@@ -79,7 +79,7 @@ Then enable it under:
 
 ## 📖 Comprehensive Documentation
 
-For detailed instructions on specific modules, please refer to our Wiki / Docs:
+For detailed instructions on specific modules, please refer to the Docs:
 
 1. [Navigation & Spatial Linking](docs/navigation.md)
 2. [Display Controls & High-Res Rendering](docs/display.md)
