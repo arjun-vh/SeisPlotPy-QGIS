@@ -1,26 +1,28 @@
-# SeisPlotPy (QGIS Plugin)
+# SeisPlotPy - QGIS Plugin
 
-**SeisPlotPy** is a subsurface acoustic data visualization and interpretation plugin for **QGIS**.  
-It allows users to load, view, navigate, analyse and interpret **2D SEG-Y (post-stack) seismic data** directly inside QGIS.
+SeisPlotPy is an advanced, open-source QGIS plugin designed for the visualization, navigation, and interpretation of SEG-Y seismic data directly within a geographic information system environment. 
 
-SeisPlotPy is designed for earth scientists, researchers, students, and geophysics workflows involving seismic reflection or sub-bottom profiler data.
+By bridging the gap between high-performance geophysical data arrays and spatial mapping, SeisPlotPy allows geoscientists to dynamically link seismic traces to real-world coordinates, pick horizons, and apply real-time signal processing.
 
----
+## 🌟 Key Features
 
-## Features
+* **Interactive Visualization:** Fast, high-resolution rendering of SEG-Y files using `pyqtgraph`. Includes customizable contrast, color palettes, and High-Res interpolation.
+* **Spatial Navigation:** Automatically extracts CDP/Source/Group coordinates, computes cumulative distances, and generates a dynamic QGIS vector layer. Double-clicking the map opens the seismic viewer; hovering over the map highlights the exact trace.
+* **Interpretation & Flattening:** Pick, edit, and manage horizons and faults. Features a dynamic "Flatten" mode to warp the seismic image and other interpretations to a reference horizon.
+* **Real-Time Processing:** Apply AGC, Bandpass filtering, and instantaneous attributes (Envelope, Phase, Frequency, RMS Amplitude) on the fly.
+* **Header Utilities:** Inspect binary and trace headers, generate QC plots, view amplitude histograms, and perform bulk CSV header patching/exporting.
 
-- Load and visualize **SEG-Y** files (via `segyio`)
-- Interactive controls for:
-- Various Colormaps (e.g., seismic, grayscale, etc.)
-- Linked **navigation with QGIS map canvas**
-- Horizon picking and editing
-- Export figures for publications and reports
-- Supports **pyqtgraph** for fast seismic rendering
-- Built with PyQt and integrates naturally with QGIS UI
+## 📦 Installation & Dependencies
 
----
+SeisPlotPy relies on several standard scientific Python libraries. Ensure these are installed in your QGIS Python environment prior to enabling the plugin.
 
-## Installation
+**Required Packages:**
+* `segyio`
+* `numpy`
+* `scipy`
+* `pandas`
+* `pyqtgraph`
+* `matplotlib`
 
 ### 1️⃣ Install dependencies
 
@@ -29,6 +31,10 @@ Before enabling the plugin, install the required Python packages into the **QGIS
 python -m pip install segyio numpy scipy pandas matplotlib pyqtgraph
 
 Tip: Users may also install these using the **QGIS Pip Manager** plugin.
+
+---
+
+The plugin will notify users if any dependencies are missing.
 
 ---
 
@@ -63,29 +69,24 @@ Then enable it under:
 
 ---
 
-##  Supported Data
+## 🚀 Quick Start Guide
 
-| Format | Supported | Notes |
-|--------|-----------|-------|
-| SEG-Y | ✅ Yes | Preferred and tested |
-| Sub-bottom profiler data exports | ⚠ Yes (if SEG-Y structured) |
+1. **Launch the Plugin:** Click the SeisPlotPy icon in the QGIS toolbar.
+2. **Load Data:** Click **Load SEG-Y** and select your file. The tool will automatically parse the headers and render the first subset of traces.
+3. **Map the Line:** Go to **Tools > Setup Geometry / Distance**. Select your X/Y coordinate headers (e.g., `CDP_X`, `CDP_Y`) and your desired Coordinate Reference System (CRS). The plugin will calculate cumulative distance and draw the seismic line on your QGIS map canvas.
+4. **Navigate:** Use the SeisPlotPy map tool in QGIS to hover over the line and see the corresponding trace in the viewer. 
+5. **Interpret:** Open **Tools > Horizon Manager**, add a new horizon, toggle "Pick," and left-click on the seismic plot to start mapping reflectors.
 
----
+## 📖 Comprehensive Documentation
 
-## Dependencies
+For detailed instructions on specific modules, please refer to our Wiki / Docs:
 
-| Library | Required |
-|---------|----------|
-| segyio | ✔ |
-| numpy | ✔ |
-| scipy | ✔ |
-| pandas | ✔ |
-| matplotlib | ✔ |
-| pyqtgraph | ✔ |
-
-The plugin will notify users if any dependencies are missing.
-
----
+1. [Navigation & Spatial Linking](docs/navigation.md)
+2. [Display Controls & High-Res Rendering](docs/display.md)
+3. [Seismic Processing & Attributes](docs/processing.md)
+4. [Horizon & Fault Interpretation](docs/interpretation.md)
+5. [Header Exploration & Patching](docs/headers.md)
+6. [Exporting Data & Figures](docs/exporting.md)
 
 ## Compatibility
 
@@ -104,10 +105,8 @@ SeisPlotPy is released under the **GPL-2.0 license**.
 
 ---
 
-## Issues & Feature Requests
-
-Found a bug? Need a feature?  
-Please report it here:
+## 🤝 Contributing
+Contributions, bug reports, and feature requests are welcome! Please open an issue or submit a pull request on GitHub.
 
 https://github.com/arjun-vh/SeisPlotPy-QGIS/issues
 
