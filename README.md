@@ -101,7 +101,7 @@ For detailed instructions on specific modules, please refer to our Wiki / Docs:
 
 ## License
 
-SeisPlotPy is released under the **GPL-2.0 license**.
+SeisPlotPy is released under the **GPL-3.0 license**.
 
 ---
 
