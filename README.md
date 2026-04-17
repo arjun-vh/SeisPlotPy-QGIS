@@ -28,7 +28,7 @@ SeisPlotPy relies on several standard scientific Python libraries. Ensure these 
 
 Before enabling the plugin, install the required Python packages into the **QGIS Python environment**:
 
-python -m pip install segyio numpy scipy pandas matplotlib pyqtgraph
+`python -m pip install segyio numpy scipy pandas matplotlib pyqtgraph`
 
 Tip: Users may also install these using the **QGIS Pip Manager** plugin.
 
