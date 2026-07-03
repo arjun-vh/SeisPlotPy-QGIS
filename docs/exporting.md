@@ -1,49 +1,40 @@
-# Exporting Data & Figures
+# Exporting
 
-Whether you need a high-resolution, publication-ready figure or a cropped subset of your raw SEG-Y data, the export engine handles it safely and accurately.
-
----
-
-## 1. Exporting Publication-Ready Figures
-
-If you have configured the perfect view of a structural feature or attribute, you can export the plot directly to an image or vector file.
-
-1. Adjust your view to the desired bounds using the navigation spinboxes or by panning/zooming.
-2. Navigate to **File > Export PDF/PNG**.
-3. **Set Resolution:** A dialog will prompt you to enter the desired DPI (Dots Per Inch). The default is `600` DPI, which is standard for academic and industry publications.
-4. **Choose Format:** You can save the file as a `PNG` (raster image), `PDF`, or `SVG` (vector graphics).
-
-### What gets exported?
-The export engine is WYSIWYG (What You See Is What You Get) but at much higher fidelity. It automatically captures:
-* **Visual Settings:** Your current colormap, percentile contrast clipping, X-axis flipping, and grid visibility are all honored.
-* **Axes Labels:** The X-axis will accurately reflect your current domain (Trace Index, CDP, or Cumulative Distance).
-* **Interpretations:** All currently visible horizons and faults are drawn over the seismic data. The export engine automatically maps the interpretation coordinates to match your current X-axis domain so they align perfectly.
-
-> 🖌️ **Vector Editing Support:** If you export to PDF or SVG, SeisPlotPy explicitly preserves the text elements (using standard font typing) and vector lines. This allows you to open the exported figure in Adobe Illustrator or Inkscape to fine-tune labels, line weights, and layout without any pixelation.
+SeisPlotPy provides tools to export your seismic data either as high-quality visual figures for publication, or as mathematical data subsets for use in other geophysical software.
 
 ---
 
-## 2. Exporting SEG-Y Subsets
+## 1. Exporting Publication Figures
 
-Massive 2D seismic lines can be cumbersome to share or process. SeisPlotPy allows you to crop the data spatially and save a new, fully compliant SEG-Y file containing only your Region of Interest (ROI).
+When you need to include a seismic section in a report, presentation, or academic paper, you can generate high-resolution image exports directly from the SeisPlotPy viewer. 
 
-1. Identify the starting and ending trace numbers you wish to keep.
-2. Navigate to **File > Export SEG-Y Subset...**
-3. A dialog will prompt you for the **Start Trace** and **End Trace**, as well as the output file location.
-4. Click **OK**.
+The export engine uses Matplotlib in the background to ensure publication-quality vector and raster graphics, entirely independent of your screen resolution.
 
-### How the Subset Engine Works
-To ensure the new file is safe and readable by any other seismic software, SeisPlotPy performs a non-destructive extraction:
-* It streams the requested traces from the original file, preventing memory overloads on massive datasets.
-* It copies the original binary header, safely updating bytes 3213-3214 to reflect the new total trace count.
-* It automatically enforces Big-Endian (`>`) byte order for maximum compatibility.
-* *Optional:* If you previously edited the text header (via **Tools > Header Utilities > View Text Header**), your custom EBCDIC text will be embedded into the new subset file.
+### How to Export a Figure
+1. In the left sidebar, locate the **Export** group. (Alternatively, use `File > Export PDF/PNG`).
+2. **Set the Dimensions:** Enter your exact desired physical size in the **W (in)** and **H (in)** spinboxes (e.g., 8 x 6 inches).
+3. **Match Aspect Ratio:** Click this button to automatically resize the SeisPlotPy window so the on-screen pixel ratio exactly matches your target physical dimensions. This ensures that what you see on screen is exactly what gets exported.
+4. Click **Export Figure**.
+5. Choose your format: **PDF** (default), **SVG**, or **PNG**.
+
+### Rendering Quality Features
+* **Vector Text Editing:** If you export to PDF or SVG, the plugin uses TrueType embedding (`pdf.fonttype = 42`, `svg.fonttype = 'none'`). This means all axis labels and tick numbers are fully editable text objects in Adobe Illustrator or Inkscape (they are not rasterized or converted to paths).
+* **Lanczos Interpolation:** The seismic image itself is rendered using high-quality Lanczos interpolation. This provides a much smoother, mathematically superior image compared to the standard viewer's bilinear smoothing.
+* **Horizon and Fault Rendering:** To distinguish interpretations on static exports, horizons are drawn as plain lines, while faults are drawn with subtle dot markers at each picked node (`linestyle='-', marker='.', markersize=2`).
 
 ---
 
-## 3. Exporting Tabular Data (CSV)
+## 2. Exporting a SEG-Y Subset
 
-SeisPlotPy offers robust CSV exporting for moving numerical data into Python, Excel, or modeling platforms. 
+If you have a massive multi-gigabyte SEG-Y file but only want to share a specific 500-trace structural feature with a colleague, you can export a raw SEG-Y subset. 
 
-* **Exporting Interpretations (Horizons & Faults):** You can extract the precise X/Y coordinates of your interpretations, appended with any raw SEG-Y trace headers you choose. *(See the [Interpretation Guide](interpretation.md) for details).*
-* **Exporting Trace Headers:** You can dump the entire metadata table (or selected columns) of your SEG-Y file. *(See the [Header Utilities Guide](headers.md) for details).*
+This creates a mathematically perfect, truncated copy of your data without re-sampling or altering the amplitudes.
+
+### How to Export a Subset
+1. Use the viewport controls (or pan/zoom) to frame the exact extent of traces and time/depth you want to export.
+2. Navigate to **File > Export SEG-Y Subset...**.
+3. A confirmation dialog will appear, stating the number of traces and the time/depth range that will be written.
+4. Click **Yes** and select a save destination.
+
+### Trace Sequence Reset
+When the subset is written to the new file, SeisPlotPy intelligently resets the `TraceSequenceFile` trace header (bytes 5–8) to consecutive integers starting at 1. This ensures that external software (like OpendTect or Petrel) correctly identifies the new file as a continuous, unbroken sequence of traces, rather than a fragmented subset.
