@@ -6,8 +6,9 @@ import re
 from qgis.PyQt.QtWidgets import QMessageBox
 
 class SeismicDataManager:
-    def __init__(self, file_path):
+    def __init__(self, file_path, suppress_dialogs=False):
         self.file_path = file_path
+        self.suppress_dialogs = suppress_dialogs
         self.n_traces = 0
         self.n_samples = 0
         self.sample_rate = 0
@@ -229,8 +230,12 @@ class SeismicDataManager:
         except Exception as e:
             print(f"SeisPlotPy: Standard load failed ({e}). Asking user for fallback...")
             
+            if self.suppress_dialogs:
+                # Silently attempt fallback during batch processing
+                self._scan_file_fallback()
+                return
+                
             # --- CONFIRMATION DIALOG ---
-            # Replicates the error message style but asks for permission to proceed
             reply = QMessageBox.question(
                 None, 
                 "SEG-Y Load Error", 
