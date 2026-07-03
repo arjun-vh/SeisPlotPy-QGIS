@@ -1,11 +1,12 @@
 import os
 from qgis.PyQt.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, 
-                             QTableWidget, QTableWidgetItem, QHeaderView, 
+                             QTreeWidget, QTreeWidgetItem, QHeaderView, 
                              QFileDialog, QColorDialog, QCheckBox, QWidget, QMessageBox,
-                             QLabel, QRadioButton, QButtonGroup)
+                             QLabel, QRadioButton, QButtonGroup, QComboBox)
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 import pandas as pd
+import os
 
 class HorizonManager(QDialog):
     picking_toggled = pyqtSignal(bool, str)
@@ -20,7 +21,7 @@ class HorizonManager(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Horizon Interpretation Manager")
-        self.resize(650, 400) # Slightly wider for new column
+        self.resize(750, 450) # Wider for tree view
         
         self.setWindowFlags(Qt.Window)
         
@@ -37,22 +38,21 @@ class HorizonManager(QDialog):
         btn_layout.addWidget(self.btn_new); btn_layout.addWidget(self.btn_import)
         layout.addLayout(btn_layout)
         
-        # Table
-        self.table = QTableWidget()
-        # Increased columns to 7 to add "Flatten" alongside Actions
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["Active", "Vis", "Name", "Color", "Points", "Flat", "Actions"])
+        # Tree
+        self.table = QTreeWidget() # Keep the name self.table to minimize controller disruption
+        self.table.setColumnCount(8)
+        self.table.setHeaderLabels(["Active", "Vis", "Name", "Group", "Color", "Points", "Flat", "Actions"])
         
         # Column Resizing
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # Name stretches
+        self.table.header().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # Name stretches
         self.table.setColumnWidth(0, 50) # Active radio
         self.table.setColumnWidth(1, 40) # Vis checkbox
-        self.table.setColumnWidth(3, 50) # Color
-        self.table.setColumnWidth(4, 50) # Points
-        self.table.setColumnWidth(5, 45) # Flat
-        self.table.setColumnWidth(6, 80) # Actions
+        self.table.setColumnWidth(3, 100) # Group
+        self.table.setColumnWidth(4, 50) # Color
+        self.table.setColumnWidth(5, 50) # Points
+        self.table.setColumnWidth(6, 45) # Flat
+        self.table.setColumnWidth(7, 80) # Actions
         
-        # --- CRITICAL FIX: Connect item changed signal to save Name edits ---
         self.table.itemChanged.connect(self.on_item_changed)
         
         layout.addWidget(self.table)
@@ -86,7 +86,7 @@ class HorizonManager(QDialog):
         count = len(self.horizons) + 1
         colors = ['#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#00FFFF', '#FF00FF']
         color = colors[len(self.horizons) % len(colors)]
-        self.horizons.append({'name': f"Horizon_{count}", 'color': color, 'points': [], 'visible': True, 'flattened': False})
+        self.horizons.append({'name': f"Horizon_{count}", 'group': 'Horizon', 'color': color, 'points': [], 'visible': True, 'flattened': False})
         self.refresh_table(); self.set_active_horizon(len(self.horizons)-1)
 
     def import_horizon(self):
@@ -98,101 +98,180 @@ class HorizonManager(QDialog):
             name = os.path.basename(file_path).split('.')[0]
             colors = ['#FF0000', '#00FF00', '#0000FF']
             color = colors[len(self.horizons) % len(colors)]
-            self.horizons.append({'name': name, 'color': color, 'points': points, 'visible': True, 'flattened': False})
+            self.horizons.append({'name': name, 'group': 'Horizon', 'color': color, 'points': points, 'visible': True, 'flattened': False})
             self.refresh_table(); self.horizon_visibility_changed.emit()
         except Exception as e: QMessageBox.critical(self, "Error", str(e))
 
-    def on_item_changed(self, item):
-        """Handle edits to table cells (specifically the Name column)."""
+    def on_item_changed(self, item, column):
+        """Handle edits to tree cells (specifically the Name column)."""
         # Column 2 is Name
-        if item.column() == 2:
-            row = item.row()
-            if row < len(self.horizons):
-                new_name = item.text()
-                self.horizons[row]['name'] = new_name
-                # If currently picking this horizon, update the status label
-                if row == self.active_horizon_index and self.is_picking:
+        if column == 2:
+            idx = item.data(0, Qt.UserRole)
+            if idx is not None and idx < len(self.horizons):
+                new_name = item.text(2)
+                self.horizons[idx]['name'] = new_name
+                if idx == self.active_horizon_index and self.is_picking:
                      self.lbl_status.setText(f"Status: Picking on {new_name}")
 
     def refresh_table(self):
-        # Block signals to prevent 'on_item_changed' from firing while we build the table
         self.table.blockSignals(True)
         try:
-            self.table.setRowCount(len(self.horizons))
-            
-            # Create new button group instead of manually removing (safer cleanup)
+            self.table.clear()
             self.pick_group = QButtonGroup(self)
             
-            for i, h in enumerate(self.horizons):
-                # 0. Active Radio Button
-                rb = QRadioButton(); rb.setChecked(i == self.active_horizon_index)
-                rb.toggled.connect(lambda c, idx=i: self.set_active_horizon(idx) if c else None)
-                self.pick_group.addButton(rb)
-                w_rb = QWidget(); l = QHBoxLayout(w_rb); l.addWidget(rb); l.setAlignment(Qt.AlignCenter); l.setContentsMargins(0,0,0,0)
-                self.table.setCellWidget(i, 0, w_rb)
+            groups = set([h.get('group', 'Horizon') for h in self.horizons])
+            
+            for group_name in sorted(groups):
+                group_item = QTreeWidgetItem(self.table)
+                group_item.setText(2, group_name)
+                font = group_item.font(2)
+                font.setBold(True)
+                group_item.setFont(2, font)
+                group_item.setExpanded(True)
                 
-                # 1. NEW: Visibility Checkbox
+                # Determine group visibility based on children
+                children_vis = [h.get('visible', True) for h in self.horizons if h.get('group', 'Horizon') == group_name]
+                group_vis = all(children_vis) if children_vis else True
+                
                 chk_vis = QCheckBox()
-                chk_vis.setChecked(h.get('visible', True))
-                # Connect toggle to data update
-                chk_vis.toggled.connect(lambda c, idx=i: self.toggle_horizon_vis(idx, c))
+                chk_vis.setChecked(group_vis)
+                chk_vis.toggled.connect(lambda c, gn=group_name: self.toggle_group_vis(gn, c))
                 w_vis = QWidget(); l2 = QHBoxLayout(w_vis); l2.addWidget(chk_vis); l2.setAlignment(Qt.AlignCenter); l2.setContentsMargins(0,0,0,0)
-                self.table.setCellWidget(i, 1, w_vis)
-
-                # 2. Name
-                self.table.setItem(i, 2, QTableWidgetItem(h['name']))
+                self.table.setItemWidget(group_item, 1, w_vis)
                 
-                # 3. Color
-                btn_col = QPushButton(); btn_col.setStyleSheet(f"background-color: {h['color']}; border: none;")
-                btn_col.clicked.connect(lambda _, idx=i: self.change_color(idx))
-                self.table.setCellWidget(i, 3, btn_col)
+                btn_col = QPushButton("🎨")
+                btn_col.setStyleSheet("background-color: transparent; border: none; font-size: 14px;")
+                btn_col.setToolTip("Change color for all horizons in group")
+                btn_col.clicked.connect(lambda _, gn=group_name: self.change_group_color(gn))
+                self.table.setItemWidget(group_item, 4, btn_col)
                 
-                # 4. Point Count
-                item_pts = QTableWidgetItem(str(len(h['points'])))
-                item_pts.setFlags(item_pts.flags() ^ Qt.ItemIsEditable) 
-                self.table.setItem(i, 4, item_pts)
+                # Master Map Button
+                btn_map_grp = QPushButton("Map")
+                btn_map_grp.setStyleSheet("background-color: #e6ffe6; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
+                btn_map_grp.setToolTip("Publish all horizons in group to QGIS Map Canvas")
+                btn_map_grp.clicked.connect(lambda _, gn=group_name: self.publish_group(gn))
                 
-                # 5. Flatten Button
-                btn_flat = QPushButton("Flat")
-                btn_flat.setCheckable(True)
-                is_flat = h.get('flattened', False)
-                btn_flat.setChecked(is_flat)
-                if is_flat:
-                    btn_flat.setStyleSheet("background-color: #ffd700; border: 1px solid #aaa; border-radius: 3px; font-size: 10px; font-weight: bold;")
-                else:
-                    btn_flat.setStyleSheet("background-color: #f0f0f0; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
-                btn_flat.setFixedWidth(35)
-                btn_flat.toggled.connect(lambda c, idx=i: self.toggle_flatten(idx, c))
-                self.table.setCellWidget(i, 5, btn_flat)
+                grp_action_w = QWidget(); l_ga = QHBoxLayout(grp_action_w); l_ga.setContentsMargins(2,2,2,2); l_ga.addWidget(btn_map_grp)
+                self.table.setItemWidget(group_item, 7, grp_action_w)
                 
-                # 6. Actions (Map + Delete)
-                action_widget = QWidget()
-                action_layout = QHBoxLayout(action_widget)
-                action_layout.setContentsMargins(2, 2, 2, 2)
-                action_layout.setSpacing(4)
-                
-                btn_map = QPushButton("Map")
-                btn_map.setToolTip("Publish horizon as a layer to QGIS Map Canvas")
-                btn_map.setStyleSheet("background-color: #e6ffe6; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
-                btn_map.setFixedWidth(40)
-                btn_map.clicked.connect(lambda _, idx=i: self.publish_requested.emit(idx))
-                
-                btn_del = QPushButton("X")
-                btn_del.setToolTip("Delete Horizon")
-                btn_del.setStyleSheet("background-color: #ffcccc; color: red; font-weight: bold; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
-                btn_del.setFixedWidth(25)
-                btn_del.clicked.connect(lambda _, idx=i: self.delete_horizon(idx))
-                
-                action_layout.addWidget(btn_map)
-                action_layout.addWidget(btn_del)
-                self.table.setCellWidget(i, 6, action_widget)
+                for i, h in enumerate(self.horizons):
+                    if h.get('group', 'Horizon') != group_name: continue
+                    
+                    child_item = QTreeWidgetItem(group_item)
+                    child_item.setFlags(child_item.flags() | Qt.ItemIsEditable)
+                    child_item.setData(0, Qt.UserRole, i) 
+                    
+                    rb = QRadioButton(); rb.setChecked(i == self.active_horizon_index)
+                    rb.toggled.connect(lambda c, idx=i: self.set_active_horizon(idx) if c else None)
+                    self.pick_group.addButton(rb)
+                    w_rb = QWidget(); l = QHBoxLayout(w_rb); l.addWidget(rb); l.setAlignment(Qt.AlignCenter); l.setContentsMargins(0,0,0,0)
+                    self.table.setItemWidget(child_item, 0, w_rb)
+                    
+                    chk_c = QCheckBox(); chk_c.setChecked(h.get('visible', True))
+                    chk_c.toggled.connect(lambda c, idx=i: self.toggle_horizon_vis(idx, c))
+                    w_c = QWidget(); l3 = QHBoxLayout(w_c); l3.addWidget(chk_c); l3.setAlignment(Qt.AlignCenter); l3.setContentsMargins(0,0,0,0)
+                    self.table.setItemWidget(child_item, 1, w_c)
+                    
+                    child_item.setText(2, h['name'])
+                    
+                    combo_group = QComboBox()
+                    # Do not make it fully editable to prevent 1-letter groups from creating chaos
+                    combo_group.addItems(sorted(groups))
+                    combo_group.addItem("+ New Group...")
+                    combo_group.setCurrentText(group_name)
+                    # Use activated instead of currentTextChanged to only fire when user finishes selection
+                    combo_group.activated.connect(lambda idx_cb, idx=i, cb=combo_group: self.change_horizon_group_combo(idx, cb))
+                    self.table.setItemWidget(child_item, 3, combo_group)
+                    
+                    btn_c = QPushButton(); btn_c.setStyleSheet(f"background-color: {h['color']}; border: none;")
+                    btn_c.clicked.connect(lambda _, idx=i: self.change_color(idx))
+                    self.table.setItemWidget(child_item, 4, btn_c)
+                    
+                    child_item.setText(5, str(len(h['points'])))
+                    
+                    btn_flat = QPushButton("Flat")
+                    btn_flat.setCheckable(True)
+                    is_flat = h.get('flattened', False)
+                    btn_flat.setChecked(is_flat)
+                    if is_flat: btn_flat.setStyleSheet("background-color: #ffd700; border: 1px solid #aaa; border-radius: 3px; font-size: 10px; font-weight: bold;")
+                    else: btn_flat.setStyleSheet("background-color: #f0f0f0; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
+                    btn_flat.setFixedWidth(35)
+                    btn_flat.toggled.connect(lambda c, idx=i: self.toggle_flatten(idx, c))
+                    self.table.setItemWidget(child_item, 6, btn_flat)
+                    
+                    action_widget = QWidget()
+                    action_layout = QHBoxLayout(action_widget)
+                    action_layout.setContentsMargins(2, 2, 2, 2); action_layout.setSpacing(4)
+                    
+                    btn_map = QPushButton("Map")
+                    btn_map.setStyleSheet("background-color: #e6ffe6; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
+                    btn_map.setFixedWidth(40)
+                    btn_map.clicked.connect(lambda _, idx=i: self.publish_requested.emit(idx))
+                    
+                    btn_del = QPushButton("X")
+                    btn_del.setStyleSheet("background-color: #ffcccc; color: red; font-weight: bold; border: 1px solid #aaa; border-radius: 3px; font-size: 10px;")
+                    btn_del.setFixedWidth(25)
+                    btn_del.clicked.connect(lambda _, idx=i: self.delete_horizon(idx))
+                    
+                    action_layout.addWidget(btn_map); action_layout.addWidget(btn_del)
+                    self.table.setItemWidget(child_item, 7, action_widget)
             
             self.btn_pick.setEnabled(len(self.horizons) > 0)
         finally:
             self.table.blockSignals(False)
 
+    def change_horizon_group_combo(self, index, combo_box):
+        text = combo_box.currentText()
+        if text == "+ New Group...":
+            from qgis.PyQt.QtWidgets import QInputDialog
+            new_group, ok = QInputDialog.getText(self, "New Group", "Enter new group name:")
+            if ok and new_group.strip():
+                text = new_group.strip()
+            else:
+                # Revert
+                combo_box.setCurrentText(self.horizons[index].get('group', 'Horizon'))
+                return
+                
+        if not text.strip(): return
+        self.horizons[index]['group'] = text
+        from qgis.PyQt.QtCore import QTimer
+        QTimer.singleShot(0, self.refresh_table)
+        self.horizon_visibility_changed.emit() # Save state
+
+    def publish_group(self, group_name):
+        """Emits publish request for all horizons in the given group"""
+        for i, h in enumerate(self.horizons):
+            if h.get('group', 'Horizon') == group_name:
+                self.publish_requested.emit(i)
+
+
+
+    def toggle_group_vis(self, group_name, state):
+        changed = False
+        for h in self.horizons:
+            if h.get('group', 'Horizon') == group_name:
+                h['visible'] = state
+                changed = True
+        if changed:
+            self.refresh_table()
+            self.horizon_visibility_changed.emit()
+
+    def change_group_color(self, group_name):
+        col = QColorDialog.getColor(QColor('#FF0000'), self)
+        if col.isValid():
+            c_name = col.name()
+            changed = False
+            for h in self.horizons:
+                if h.get('group', 'Horizon') == group_name:
+                    h['color'] = c_name
+                    changed = True
+            if changed:
+                self.refresh_table()
+                self.horizon_color_changed.emit()
+
     def toggle_horizon_vis(self, index, state):
         self.horizons[index]['visible'] = state
+        self.refresh_table()
         self.horizon_visibility_changed.emit()
 
     def toggle_flatten(self, index, state):
@@ -223,15 +302,24 @@ class HorizonManager(QDialog):
             self.lbl_status.setText("Status: Viewing Mode"); self.lbl_status.setStyleSheet("font-weight: bold; color: gray;")
         self.picking_toggled.emit(self.is_picking, name)
 
+    def _find_tree_item(self, target_idx):
+        for i in range(self.table.topLevelItemCount()):
+            group_item = self.table.topLevelItem(i)
+            for j in range(group_item.childCount()):
+                child = group_item.child(j)
+                if child.data(0, Qt.UserRole) == target_idx:
+                    return child
+        return None
+
     def add_point(self, x, y):
         if self.active_horizon_index == -1: return
         self.horizons[self.active_horizon_index]['points'].append((x, y))
         self.horizons[self.active_horizon_index]['points'].sort(key=lambda p: p[0])
         
         count = len(self.horizons[self.active_horizon_index]['points'])
-        item = QTableWidgetItem(str(count))
-        item.setFlags(item.flags() ^ Qt.ItemIsEditable)
-        self.table.setItem(self.active_horizon_index, 4, item) # Updated col index
+        item = self._find_tree_item(self.active_horizon_index)
+        if item:
+            item.setText(5, str(count))
         
         self.horizon_visibility_changed.emit()
 
@@ -254,9 +342,9 @@ class HorizonManager(QDialog):
             del points[idx_to_remove]
             
             count = len(points)
-            item = QTableWidgetItem(str(count))
-            item.setFlags(item.flags() ^ Qt.ItemIsEditable)
-            self.table.setItem(self.active_horizon_index, 4, item) # Updated col index
+            item = self._find_tree_item(self.active_horizon_index)
+            if item:
+                item.setText(5, str(count))
             
             self.horizon_visibility_changed.emit()
 
@@ -280,4 +368,6 @@ class HorizonManager(QDialog):
     def restore_state(self, horizons_data):
         if not horizons_data: return
         self.horizons = horizons_data
+        for h in self.horizons:
+            h.setdefault('group', 'Horizon')
         self.refresh_table()

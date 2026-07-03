@@ -24,9 +24,16 @@ class SeismicView(QMainWindow):
         self.sidebar.setStyleSheet("background-color: #f0f0f0; border-right: 1px solid #ccc;")
         self.sidebar_layout = QVBoxLayout(self.sidebar)
         
-        self.btn_load = QPushButton("Load SEG-Y")
-        self.btn_load.setMinimumHeight(40)
-        self.sidebar_layout.addWidget(self.btn_load)
+        load_layout = QHBoxLayout()
+        self.btn_load_single = QPushButton("Load Single\nSEG-Y")
+        self.btn_load_single.setMinimumHeight(45)
+        
+        self.btn_load_batch = QPushButton("Batch load\nmultiple SEG-Y")
+        self.btn_load_batch.setMinimumHeight(45)
+        
+        load_layout.addWidget(self.btn_load_single)
+        load_layout.addWidget(self.btn_load_batch)
+        self.sidebar_layout.addLayout(load_layout)
         
         self.sidebar_layout.addSpacing(5)
         
@@ -91,32 +98,76 @@ class SeismicView(QMainWindow):
         
         self.chk_flip_x = QCheckBox("Flip X")
         self.chk_grid = QCheckBox("Grid"); self.chk_grid.setChecked(True)
+        self.btn_grid_cfg = QPushButton("⚙")
+        self.btn_grid_cfg.setFixedWidth(20)
+        self.btn_grid_cfg.setToolTip("Configure Grid settings")
+        
+        grid_layout = QHBoxLayout()
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        grid_layout.addWidget(self.chk_grid)
+        grid_layout.addWidget(self.btn_grid_cfg)
+        grid_layout.addStretch()
         
         self.chk_smooth = QCheckBox("Smooth")
         self.chk_smooth.setToolTip("Enable bilinear interpolation (anti-aliasing)")
 
         self.chk_high_res = QCheckBox("High Res")
         self.chk_high_res.setToolTip("Interpolate data (4x) for vector-like display. (CPU Intensive)")
+        
+        self.btn_high_res_cfg = QPushButton("⚙")
+        self.btn_high_res_cfg.setFixedWidth(20)
+        self.btn_high_res_cfg.setToolTip("Configure High-Res mode settings")
+        
+        high_res_layout = QHBoxLayout()
+        high_res_layout.setContentsMargins(0, 0, 0, 0)
+        high_res_layout.addWidget(self.chk_high_res)
+        high_res_layout.addWidget(self.btn_high_res_cfg)
+        high_res_layout.addStretch()
 
         # Row 0
         toggle_layout.addWidget(self.chk_flip_x, 0, 0)
-        toggle_layout.addWidget(self.chk_grid, 0, 1)
+        toggle_layout.addLayout(grid_layout, 0, 1)
         
         # Row 1
         toggle_layout.addWidget(self.chk_smooth, 1, 0)
-        toggle_layout.addWidget(self.chk_high_res, 1, 1)
+        toggle_layout.addLayout(high_res_layout, 1, 1)
 
         self.sidebar_layout.addLayout(toggle_layout)
         
         self.sidebar_layout.addWidget(QLabel("Colormap:"))
         self.combo_cmap = QComboBox()
+        from qgis.PyQt.QtCore import QSize
+        self.combo_cmap.setIconSize(QSize(80, 14))
+        
         try:
             all_cmaps = sorted(plt.colormaps())
         except Exception:
             # Fallback to common colormap names if API fails
             all_cmaps = ['viridis', 'seismic', 'gray', 'jet', 'RdBu', 'hot', 'cool']
             
-        self.combo_cmap.addItems(all_cmaps)
+        from qgis.PyQt.QtGui import QImage, QPixmap, QIcon, QColor
+        for cmap_name in all_cmaps:
+            try:
+                if hasattr(plt, 'colormaps') and hasattr(plt.colormaps, '__getitem__'):
+                    cmap = plt.colormaps[cmap_name]
+                else:
+                    cmap = cm.get_cmap(cmap_name)
+                    
+                width = 80
+                gradient = np.linspace(0, 1, width)
+                rgba = cmap(gradient)
+                
+                qimg = QImage(width, 1, QImage.Format_ARGB32)
+                for x in range(width):
+                    r, g, b, a = rgba[x]
+                    qimg.setPixelColor(x, 0, QColor(int(r*255), int(g*255), int(b*255), int(a*255)))
+                
+                pixmap = QPixmap.fromImage(qimg.scaled(width, 14))
+                icon = QIcon(pixmap)
+                self.combo_cmap.addItem(icon, cmap_name)
+            except Exception:
+                self.combo_cmap.addItem(cmap_name)
+                
         self.combo_cmap.setCurrentText("seismic")
         self.sidebar_layout.addWidget(self.combo_cmap)
         
@@ -124,6 +175,10 @@ class SeismicView(QMainWindow):
         self.spin_contrast = QDoubleSpinBox()
         self.spin_contrast.setRange(50.0, 100.0); self.spin_contrast.setValue(99.0); self.spin_contrast.setSingleStep(0.1)
         self.sidebar_layout.addWidget(self.spin_contrast)
+        
+        self.chk_show_legend = QCheckBox("Show Color Legend")
+        self.chk_show_legend.setChecked(False)
+        self.sidebar_layout.addWidget(self.chk_show_legend)
         
         self.sidebar_layout.addSpacing(10)
         
@@ -165,9 +220,39 @@ class SeismicView(QMainWindow):
         self.plot_widget.setLabel('bottom', 'Trace Index')
         self.plot_widget.getPlotItem().setAspectLocked(False) 
         
+        # --- COLORBAR WIDGET ---
+        self.color_bar = pg.HistogramLUTWidget(image=self.img_item)
+        self.color_bar.setFixedWidth(120)
+        self.color_bar.hide() # Hidden by default
+        
+        # Enforce Single Source of Truth: Disable the internal context menu 
+        # so the user must use the main Matplotlib combo box for colormaps.
+        self.color_bar.vb.setMenuEnabled(False)
+        if hasattr(self.color_bar.gradient, 'menu'):
+            self.color_bar.gradient.menu = None
+            
+        # Override the right click event to prevent the menu from popping up
+        def null_mouse_click(ev):
+            if ev.button() == Qt.RightButton:
+                ev.accept()
+            else:
+                # Call original for left clicks (to allow moving the gradient ticks if desired)
+                pg.TickSliderItem.mouseClickEvent(self.color_bar.gradient, ev)
+                
+        self.color_bar.gradient.mouseClickEvent = null_mouse_click
+        
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.sidebar)
-        splitter.addWidget(self.plot_widget)
+        
+        # Container for plot and colorbar
+        plot_container = QWidget()
+        plot_layout = QHBoxLayout(plot_container)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        plot_layout.setSpacing(0)
+        plot_layout.addWidget(self.plot_widget)
+        plot_layout.addWidget(self.color_bar)
+        
+        splitter.addWidget(plot_container)
         self.layout.addWidget(splitter)
 
         # --- NEW CODE: Enable Status Bar for Coordinates ---
@@ -191,6 +276,14 @@ class SeismicView(QMainWindow):
              
         lut = (colormap(np.arange(256)) * 255).astype(np.uint8)
         self.img_item.setLookupTable(lut)
+        
+        try:
+            # Synchronize gradient on the colorbar
+            # Older pyqtgraph uses restoreState, newer uses setColorMap
+            cmap_pg = pg.ColorMap(np.linspace(0.0, 1.0, 256), lut)
+            self.color_bar.gradient.setColorMap(cmap_pg)
+        except Exception:
+            pass
     
     def update_labels(self, x_label, y_domain):
         self.plot_widget.setLabel('bottom', x_label)

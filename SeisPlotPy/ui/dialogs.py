@@ -155,3 +155,131 @@ class ExportSubsetDialog(QDialog):
     def get_inputs(self):
         """Returns (output_path, start_trace, end_trace)"""
         return self.txt_path.text(), self.spin_start.value(), self.spin_end.value()
+
+class HighResConfigDialog(QDialog):
+    def __init__(self, current_limit=10000000, current_vert=1, current_horz=4, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("High-Resolution Mode Settings")
+        self.resize(500, 300)
+        
+        layout = QVBoxLayout(self)
+        
+        info_label = QLabel(
+            "<b>About High-Res Mode (2D Cubic Interpolation)</b><br><br>"
+            "This mode applies Cubic Spline math to compute missing smooth curves "
+            "between the raw samples. It eliminates blocky gradient bands on extreme zoom.<br><br>"
+            "<b>Multipliers (x):</b> A multiplier of 4x means the engine generates 4 smooth sub-samples "
+            "for every 1 original data sample in that direction. Higher values yield smoother curves but cost more RAM.<br><br>"
+            "<i>Note: Memory and CPU costs scale geometrically. It is highly recommended to zoom in and click 'Apply' "
+            "to load a smaller trace subset before enabling 2D interpolation on large MCS sections.</i>"
+        )
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        layout.addSpacing(10)
+
+        # Multipliers
+        mult_layout = QHBoxLayout()
+        mult_layout.addWidget(QLabel("Vertical (Time/Depth) Multiplier:"))
+        self.combo_vert = QComboBox()
+        self.combo_vert.addItems(["1x (Off)", "2x", "4x", "8x"])
+        self.combo_vert.setCurrentText(f"{current_vert}x" if current_vert > 1 else "1x (Off)")
+        mult_layout.addWidget(self.combo_vert)
+        
+        mult_layout.addSpacing(10)
+        
+        mult_layout.addWidget(QLabel("Horizontal (Trace) Multiplier:"))
+        self.combo_horz = QComboBox()
+        self.combo_horz.addItems(["1x (Off)", "2x", "4x", "8x"])
+        self.combo_horz.setCurrentText(f"{current_horz}x" if current_horz > 1 else "1x (Off)")
+        mult_layout.addWidget(self.combo_horz)
+        
+        layout.addLayout(mult_layout)
+        
+        layout.addSpacing(5)
+        
+        # Limit
+        limit_layout = QHBoxLayout()
+        limit_layout.addWidget(QLabel("Safety Limit (Input Samples):"))
+        self.spin_limit = QSpinBox()
+        self.spin_limit.setRange(100000, 500000000)
+        self.spin_limit.setSingleStep(1000000)
+        self.spin_limit.setValue(current_limit)
+        limit_layout.addWidget(self.spin_limit)
+        layout.addLayout(limit_layout)
+        
+        self.lbl_ram = QLabel()
+        self.lbl_ram.setStyleSheet("color: #aa0000; font-weight: bold;")
+        layout.addWidget(self.lbl_ram)
+        
+        self.spin_limit.valueChanged.connect(self.update_ram_label)
+        self.combo_vert.currentTextChanged.connect(self.update_ram_label)
+        self.combo_horz.currentTextChanged.connect(self.update_ram_label)
+        
+        self.update_ram_label()
+        
+        layout.addSpacing(10)
+        
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _get_mult(self, text):
+        return int(text.split('x')[0])
+
+    def update_ram_label(self, *args):
+        val = self.spin_limit.value()
+        v = self._get_mult(self.combo_vert.currentText())
+        h = self._get_mult(self.combo_horz.currentText())
+        
+        # Output array size is (val * v * h). 
+        # Float32 is 4 bytes. Scipy zoom requires roughly 2-3x overhead for splines.
+        # So peak memory is roughly output_size * 4 bytes * 3 overhead = output_size * 12 bytes.
+        ram_mb = (val * v * h * 12) / (1024 * 1024)
+        
+        self.lbl_ram.setText(f"Estimated Peak RAM Overhead for Max Size: ~{ram_mb:.0f} MB")
+
+    def get_settings(self):
+        return {
+            'limit': self.spin_limit.value(),
+            'vert': self._get_mult(self.combo_vert.currentText()),
+            'horz': self._get_mult(self.combo_horz.currentText())
+        }
+
+from qgis.PyQt.QtWidgets import QSlider, QCheckBox
+from qgis.PyQt.QtCore import Qt
+class GridConfigDialog(QDialog):
+    def __init__(self, grid_x=True, grid_y=True, grid_alpha=76, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Grid Settings")
+        self.resize(300, 150)
+        layout = QVBoxLayout(self)
+
+        self.chk_x = QCheckBox("Show X-Axis Grid (Traces)")
+        self.chk_x.setChecked(grid_x)
+        layout.addWidget(self.chk_x)
+
+        self.chk_y = QCheckBox("Show Y-Axis Grid (Time/Depth)")
+        self.chk_y.setChecked(grid_y)
+        layout.addWidget(self.chk_y)
+
+        layout.addSpacing(10)
+        layout.addWidget(QLabel("Grid Transparency (Alpha):"))
+        self.slider_alpha = QSlider(Qt.Horizontal)
+        self.slider_alpha.setRange(10, 255)
+        self.slider_alpha.setValue(grid_alpha)
+        layout.addWidget(self.slider_alpha)
+
+        layout.addSpacing(10)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def get_settings(self):
+        return {
+            'grid_x': self.chk_x.isChecked(),
+            'grid_y': self.chk_y.isChecked(),
+            'grid_alpha': self.slider_alpha.value()
+        }
