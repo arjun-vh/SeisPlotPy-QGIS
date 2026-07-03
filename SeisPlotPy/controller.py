@@ -31,6 +31,7 @@ from .ui.horizon_manager import HorizonManager
 from .ui.fault_manager import FaultManager
 from .ui.dialogs import GeometryDialog, BandpassDialog
 from .ui.dialogs import ExportSubsetDialog
+from .ui.doc_viewer import HelpViewer
 from .core.data_handler import SeismicDataManager
 from .core.processing import SeismicProcessing
 
@@ -70,6 +71,17 @@ class MainController(QObject):
         self.world_coords = None
         self.coord_step = 1  # Track decimation step for coordinate array   
         
+        # High Res Mode Config
+        settings = QSettings("SeisPlotPy", "DisplaySettings")
+        self.high_res_limit = int(settings.value("high_res_limit", 10000000))
+        self.high_res_vert = int(settings.value("high_res_vert", 1))
+        self.high_res_horz = int(settings.value("high_res_horz", 4))
+        
+        # Grid Settings
+        self.grid_x = settings.value("grid_x", True, type=bool)
+        self.grid_y = settings.value("grid_y", True, type=bool)
+        self.grid_alpha = int(settings.value("grid_alpha", 76)) # default alpha 0.3 * 255
+        
         # Performance Cache
         self.map_xform = None
         self.last_map_crs = None
@@ -93,7 +105,8 @@ class MainController(QObject):
         self.setup_menu()
 
         # Connections
-        self.view.btn_load.clicked.connect(self.load_file)
+        self.view.btn_load_single.clicked.connect(self.load_file)
+        self.view.btn_load_batch.clicked.connect(self.run_batch_load)
         self.view.btn_apply.clicked.connect(self.apply_changes)
         self.view.btn_reset.clicked.connect(self.reset_view)
         
@@ -104,8 +117,11 @@ class MainController(QObject):
         self.view.btn_export.clicked.connect(self.export_figure)
         self.view.chk_flip_x.stateChanged.connect(self.toggle_flip_x)
         self.view.chk_grid.stateChanged.connect(self.toggle_grid)
+        self.view.btn_grid_cfg.clicked.connect(self.show_grid_config)
         self.view.chk_smooth.stateChanged.connect(self.toggle_smooth)
+        self.view.chk_show_legend.stateChanged.connect(lambda state: self.view.color_bar.setVisible(state == Qt.Checked))
         self.view.chk_high_res.stateChanged.connect(lambda: self.update_display_only())
+        self.view.btn_high_res_cfg.clicked.connect(self.show_high_res_config)
         self.view.btn_preview_ratio.clicked.connect(self.match_aspect_ratio)
         self.view.plot_widget.sigRangeChanged.connect(self.sync_view_to_controls)
         self.view.combo_header.activated.connect(self.on_header_changed)
@@ -1346,9 +1362,10 @@ class MainController(QObject):
             self.view.update_status(f"Loaded: {file_path.split('/')[-1]}\nTraces: {total_traces}")
 
             # Lock the load button
-            self.view.btn_load.setEnabled(False)
-            self.view.btn_load.setText(f"Linked: {os.path.basename(file_path)}")
-            self.view.btn_load.setToolTip("File loaded. To open another line, use the QGIS Toolbar button.")
+            self.view.btn_load_single.setEnabled(False)
+            self.view.btn_load_single.setText(f"Linked:\n{os.path.basename(file_path)}")
+            self.view.btn_load_single.setToolTip("File loaded. To open another line, use the QGIS Toolbar button.")
+            self.view.btn_load_batch.setEnabled(False)
             
             if hasattr(self, 'action_load_menu'):
                 self.action_load_menu.setEnabled(False)
@@ -1364,6 +1381,128 @@ class MainController(QObject):
         except Exception as e:
             self.view.update_status("Load failed.")
             QMessageBox.critical(self.view, "Error", f"Failed to load file:\n{str(e)}")
+
+    def run_batch_load(self):
+        """Batch load multiple SEG-Y files into the QGIS map canvas without loading seismic data to view."""
+        from qgis.PyQt.QtWidgets import QFileDialog, QMessageBox, QProgressDialog, QDialog
+        from qgis.PyQt.QtCore import Qt, QCoreApplication
+        from qgis.gui import QgsProjectionSelectionDialog
+        from .core.data_handler import SeismicDataManager
+        from .core.processing import SeismicProcessing
+        from .ui.dialogs import GeometryDialog
+        import os
+        
+        # 1. Select files
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self.view, 
+            "Select SEG-Y Files for Batch Loading", 
+            "", 
+            "SEG-Y Files (*.sgy *.segy);;All Files (*.*)"
+        )
+        if not file_paths: return
+        
+        # 2. Warn User about Header Uniformity
+        warn = QMessageBox.warning(
+            self.view, 
+            "Batch Load Notice",
+            f"You have selected {len(file_paths)} files.\n\n"
+            "This batch process assumes that ALL selected SEG-Y files share the exact same Trace Header mapping (e.g. CDP_X byte locations) and the same Coordinate Reference System (CRS).\n\n"
+            "Do you want to proceed?", 
+            QMessageBox.Yes | QMessageBox.No, 
+            QMessageBox.Yes
+        )
+        if warn != QMessageBox.Yes: return
+        
+        # 3. Initialize first file to get available headers
+        try:
+            temp_mgr = SeismicDataManager(file_paths[0], suppress_dialogs=True)
+            headers = temp_mgr.available_headers
+            del temp_mgr
+        except Exception as e:
+            QMessageBox.critical(self.view, "Error", f"Failed to read headers from the first file:\n{e}")
+            return
+            
+        # 4. Prompt for Geometry Settings
+        dlg = GeometryDialog(headers, self.view)
+        if dlg.exec() != QDialog.Accepted: return
+        settings = dlg.get_settings()
+        
+        # 5. Prompt for CRS
+        selector = QgsProjectionSelectionDialog(self.view)
+        selector.setMessage("Select CRS for Coordinates (e.g., UTM Zone or WGS84)")
+        if not selector.exec(): return
+        crs = selector.crs()
+        
+        # 6. Process Loop
+        progress = QProgressDialog("Batch Loading SEG-Y Tracks...", "Abort", 0, len(file_paths), self.view)
+        progress.setWindowModality(Qt.WindowModal)
+        
+        success_count = 0
+        for i, path in enumerate(file_paths):
+            progress.setValue(i)
+            QCoreApplication.processEvents()
+            
+            if progress.wasCanceled(): 
+                break
+                
+            progress.setLabelText(f"Processing ({i+1}/{len(file_paths)}):\n{os.path.basename(path)}")
+            QCoreApplication.processEvents()
+            
+            try:
+                mgr = SeismicDataManager(path, suppress_dialogs=True)
+                
+                # Fetch Coordinates manually
+                raw_x = mgr.get_header_slice(settings['x_key'], 0, mgr.n_traces, 1)
+                raw_y = mgr.get_header_slice(settings['y_key'], 0, mgr.n_traces, 1)
+                units = mgr.coordinate_units
+                
+                if settings['use_header']:
+                    scalars = mgr.get_header_slice(settings['scalar_key'], 0, mgr.n_traces, 1)
+                    scaled_x = SeismicProcessing.apply_scalar(raw_x, scalars, coord_units=units)
+                    scaled_y = SeismicProcessing.apply_scalar(raw_y, scalars, coord_units=units)
+                else:
+                    scaled_x = raw_x * settings['manual_val']
+                    scaled_y = raw_y * settings['manual_val']
+                    if units == 2:
+                        scaled_x /= 3600.0
+                        scaled_y /= 3600.0
+
+                dist = SeismicProcessing.calculate_cumulative_distance(scaled_x, scaled_y, is_geographic=(crs is not None and crs.isGeographic()))
+                if dist[-1] > 10000:
+                    dist = dist / 1000.0
+                
+                if i == len(file_paths) - 1:
+                    # --- Link the last file to the current open window ---
+                    self.load_file_from_path(path, load_data_only=True)
+                    self.full_cum_dist = dist
+                    self.dist_unit = "km" if dist[-1] > 10000 else "m"
+                    self.create_qgis_layer(scaled_x, scaled_y, crs, settings)
+                    del mgr
+                else:
+                    # --- Process in background for all other files ---
+                    from .controller import MainController
+                    ctrl = MainController(self.iface)
+                    ctrl.view.hide()
+                    ctrl.data_manager = mgr
+                    ctrl.full_cum_dist = dist
+                    ctrl.dist_unit = "km" if dist[-1] > 10000 else "m"
+                    
+                    # Generate the vector line in QGIS
+                    ctrl.create_qgis_layer(scaled_x, scaled_y, crs, settings)
+                    
+                    # Clean up memory
+                    ctrl.view.deleteLater()
+                    del ctrl.data_manager
+                    del ctrl
+                    del mgr
+                
+                success_count += 1
+                
+            except Exception as e:
+                print(f"SeisPlotPy Batch Error [{os.path.basename(path)}]: {e}")
+                
+        progress.setValue(len(file_paths))
+        QMessageBox.information(self.view, "Batch Complete", f"Successfully loaded {success_count} / {len(file_paths)} tracks into QGIS.")
 
     def load_file_from_path(self, path, load_data_only=False):
         """Helper to load a file directly (internal use)."""
@@ -1397,8 +1536,9 @@ class MainController(QObject):
             self.load_data_internal(0, total_traces, smart_step, auto_fit=True, create_layer=not load_data_only)
             
             self.view.update_status(f"Loaded: {path.split('/')[-1]}\nTraces: {total_traces}")
-            self.view.btn_load.setEnabled(False)
-            self.view.btn_load.setText(f"Linked: {os.path.basename(path)}")
+            self.view.btn_load_single.setEnabled(False)
+            self.view.btn_load_single.setText(f"Linked:\n{os.path.basename(path)}")
+            self.view.btn_load_batch.setEnabled(False)
             if hasattr(self, 'action_load_menu'): self.action_load_menu.setEnabled(False)
             self.action_header_explorer.setEnabled(True)
             self.action_export.setEnabled(True)
@@ -1513,6 +1653,7 @@ class MainController(QObject):
     def load_data_internal(self, start, end, step, auto_fit=False, create_layer=True):
         try:
             self.loaded_start_trace = max(0, start); self.loaded_end_trace = min(self.data_manager.n_traces, end)
+            self.current_step = step
             if self.loaded_start_trace >= self.loaded_end_trace: return
             self.current_data = self.data_manager.get_data_slice(self.loaded_start_trace, self.loaded_end_trace, step)
             self.t_vals = self.data_manager.time_axis
@@ -1590,7 +1731,28 @@ class MainController(QObject):
         self.view.spin_x_min.blockSignals(False); self.view.spin_x_max.blockSignals(False); self.view.spin_y_min.blockSignals(False); self.view.spin_y_max.blockSignals(False)
     def toggle_manual_step(self, state): self.view.spin_step.setEnabled(state == 2)
     def toggle_flip_x(self, state): self.view.plot_widget.getPlotItem().invertX(state == 2)
-    def toggle_grid(self, state): self.view.plot_widget.showGrid(x=(state == 2), y=(state == 2))
+    def toggle_grid(self, state):
+        if state == 2:
+            self.view.plot_widget.showGrid(x=self.grid_x, y=self.grid_y, alpha=self.grid_alpha/255.0)
+        else:
+            self.view.plot_widget.showGrid(x=False, y=False)
+
+    def show_grid_config(self):
+        from .ui.dialogs import GridConfigDialog
+        dlg = GridConfigDialog(grid_x=self.grid_x, grid_y=self.grid_y, grid_alpha=self.grid_alpha, parent=self.view)
+        if dlg.exec() == QDialog.Accepted:
+            settings_dict = dlg.get_settings()
+            self.grid_x = settings_dict['grid_x']
+            self.grid_y = settings_dict['grid_y']
+            self.grid_alpha = settings_dict['grid_alpha']
+            
+            settings = QSettings("SeisPlotPy", "DisplaySettings")
+            settings.setValue("grid_x", self.grid_x)
+            settings.setValue("grid_y", self.grid_y)
+            settings.setValue("grid_alpha", self.grid_alpha)
+            
+            if self.view.chk_grid.isChecked():
+                self.toggle_grid(2)
     
     def toggle_smooth(self, state):
         """Enables Bilinear Interpolation (Smooth Pixmap Transform)."""
@@ -1710,6 +1872,42 @@ class MainController(QObject):
         self.action_histogram.triggered.connect(self.show_amplitude_histogram)
         self.action_histogram.setEnabled(False)
         tools_menu.addAction(self.action_histogram)
+
+        # 4. Help Menu
+        help_menu = menu_bar.addMenu("Help")
+        
+        self.action_docs = QAction("Documentation", self.view)
+        self.action_docs.triggered.connect(self.show_docs)
+        help_menu.addAction(self.action_docs)
+        
+        self.action_about = QAction("About SeisPlotPy", self.view)
+        self.action_about.triggered.connect(self.show_about)
+        help_menu.addAction(self.action_about)
+
+    def show_docs(self):
+        """Display the native PyQt documentation viewer."""
+        if not hasattr(self, 'doc_viewer') or not self.doc_viewer.isVisible():
+            self.doc_viewer = HelpViewer(self.view)
+            self.doc_viewer.show()
+        else:
+            self.doc_viewer.raise_()
+            self.doc_viewer.activateWindow()
+
+    def show_about(self):
+        """Display the About dialog with philosophy, developer info, and acknowledgments."""
+        about_text = (
+            "<h3>SeisPlotPy</h3>"
+            "<p><b>Version:</b> 1.0.5</p>"
+            "<p><b>Developer:</b> Arjun V H</p>"
+            "<hr>"
+            "<h4>Philosophy</h4>"
+            "<p>SeisPlotPy is built on the open-source philosophy of seamlessly integrating subsurface geophysical data with geospatial environments. By bridging the gap between seismic interpretation and Geographic Information Systems (GIS), it empowers researchers to visualize, correlate, and analyze multi-dimensional earth data within a single, unified mapping ecosystem.</p>"
+            "<hr>"
+            "<h4>Acknowledgments</h4>"
+            "<p>This project was made possible by the supportive ecosystem and infrastructure provided by the <b>National Centre for Polar and Ocean Research (NCPOR)</b>. Heartfelt thanks to all my colleagues for their continuous support, discussions, and collaboration.</p>"
+            "<p>Additional thanks to <b>Mr. Muhammed Anshif K K</b> for providing the initial prototype script that inspired the Batch SEG-Y Loading feature.</p>"
+        )
+        QMessageBox.about(self.view, "About SeisPlotPy", about_text)
     def show_text_header(self): 
         if not self.data_manager: return
         # Keep a reference so it's not garbage collected
@@ -1768,6 +1966,26 @@ class MainController(QObject):
         self.view.chk_high_res.setChecked(False)
         self.view.chk_high_res.blockSignals(False)
 
+    def show_high_res_config(self):
+        from .ui.dialogs import HighResConfigDialog
+        dlg = HighResConfigDialog(current_limit=self.high_res_limit, 
+                                  current_vert=self.high_res_vert, 
+                                  current_horz=self.high_res_horz, 
+                                  parent=self.view)
+        if dlg.exec() == QDialog.Accepted:
+            settings_dict = dlg.get_settings()
+            self.high_res_limit = settings_dict['limit']
+            self.high_res_vert = settings_dict['vert']
+            self.high_res_horz = settings_dict['horz']
+            
+            settings = QSettings("SeisPlotPy", "DisplaySettings")
+            settings.setValue("high_res_limit", self.high_res_limit)
+            settings.setValue("high_res_vert", self.high_res_vert)
+            settings.setValue("high_res_horz", self.high_res_horz)
+            
+            if self.view.chk_high_res.isChecked():
+                self.update_display_only()
+
     def update_display_only(self):
         if self.current_data is None: return
         
@@ -1795,16 +2013,27 @@ class MainController(QObject):
         # Only interpolate if the user explicitly requested it
         if self.view.chk_high_res.isChecked():
             try:
-                # Safety Limit: Prevent freezing on massive datasets (> 10 million samples)
-                if data_to_plot.size < 10000000: 
-                     # Zoom 1x on Time (Axis 0), 4x on Traces (Axis 1)
-                     # order = 3 (Cubic), mode='nearest'
-                     data_to_plot = zoom(data_to_plot, (1, 4), order=3, mode='nearest')
+                # Prevent applying interpolation on decimated overview data
+                if getattr(self, 'current_step', 1) > 1:
+                     self.view.update_status("High-Res disabled: Cannot interpolate decimated overview data. Zoom in to apply.")
+                     QTimer.singleShot(0, self._force_uncheck_high_res)
+                # Safety Limit: Prevent freezing on massive datasets
+                elif data_to_plot.size <= self.high_res_limit: 
+                     v_mult = self.high_res_vert
+                     h_mult = self.high_res_horz
+                     
+                     if v_mult > 1 or h_mult > 1:
+                         # Force native C-contiguous float32 array to prevent scipy C-extension failures on Big-Endian Memmap data
+                         data_native = np.ascontiguousarray(data_to_plot, dtype=np.float32)
+                         # Zoom using user multipliers, order = 3 (Cubic)
+                         data_to_plot = zoom(data_native, (v_mult, h_mult), order=3, mode='nearest')
                 else:
-                     self.view.update_status("Data too large for High-Res mode.")
+                     self.view.update_status(f"Data exceeds High-Res limit. Increase limit in settings (⚙) if you have enough RAM.")
                      QTimer.singleShot(0, self._force_uncheck_high_res)
             except Exception as e:
                 print(f"Interpolation error: {e}")
+                self.view.update_status(f"Interpolation failed (Out of Memory/Error). Disabled.")
+                QTimer.singleShot(0, self._force_uncheck_high_res)
         # -----------------------------------------
 
         # 3. Display Data
@@ -1832,6 +2061,13 @@ class MainController(QObject):
             else: 
                 clip_val = 1.0
             self.view.img_item.setLevels([-clip_val, clip_val])
+            
+            # Sync the colorbar explicitly
+            if hasattr(self.view, 'color_bar'):
+                try:
+                    self.view.color_bar.setLevels(min=-clip_val, max=clip_val)
+                except Exception:
+                    pass
             
         except Exception as e:
             print(f"Contrast update error: {e}")
@@ -2106,12 +2342,21 @@ class MainController(QObject):
         exported = 0
         for idx, h in visible:
             base = h['name']
-            if base in name_counts:
-                name_counts[base] += 1
-                fname = f"{base}_{name_counts[base]}.csv"
+            group = h.get('group', 'Horizon')
+            
+            # Clean group name to be path-safe
+            safe_group = "".join([c for c in group if c.isalpha() or c.isdigit() or c==' ']).rstrip()
+            safe_group = safe_group.replace(' ', '_')
+            
+            # Formulate new base name
+            file_base = f"{safe_group}_{base}"
+            
+            if file_base in name_counts:
+                name_counts[file_base] += 1
+                fname = f"{file_base}_{name_counts[file_base]}.csv"
             else:
-                name_counts[base] = 0
-                fname = f"{base}.csv"
+                name_counts[file_base] = 0
+                fname = f"{file_base}.csv"
             path = os.path.join(export_dir, fname)
             try:
                 self._export_horizon_to_file(h, path, selected_headers)
@@ -2139,14 +2384,21 @@ class MainController(QObject):
         selected_headers = dlg.get_selected_headers()
         name_counts = {}
         exported = 0
+        import re
         for idx, f in visible:
+            group = f.get('group', 'Fault')
             base = f['name']
-            if base in name_counts:
-                name_counts[base] += 1
-                fname = f"{base}_{name_counts[base]}.csv"
+            
+            safe_group = re.sub(r'[^a-zA-Z0-9_\-]', '_', group)
+            safe_base = re.sub(r'[^a-zA-Z0-9_\-]', '_', base)
+            full_name = f"{safe_group}_{safe_base}"
+            
+            if full_name in name_counts:
+                name_counts[full_name] += 1
+                fname = f"{full_name}_{name_counts[full_name]}.csv"
             else:
-                name_counts[base] = 0
-                fname = f"{base}.csv"
+                name_counts[full_name] = 0
+                fname = f"{full_name}.csv"
             path = os.path.join(export_dir, fname)
             try:
                 self._export_fault_to_file(f, path, selected_headers)
@@ -2161,9 +2413,14 @@ class MainController(QObject):
         if not points:
             return
             
-        x_vals, y_vals = zip(*points)
-        trace_indices = np.array(x_vals, dtype=int)
-        y_arr = np.array(y_vals)
+        sorted_pts = sorted(points, key=lambda k: k[0])
+        picked_indices = np.array([int(p[0]) for p in sorted_pts])
+        picked_times = np.array([p[1] for p in sorted_pts])
+        
+        min_idx = int(np.min(picked_indices))
+        max_idx = int(np.max(picked_indices))
+        trace_indices = np.arange(min_idx, max_idx + 1)
+        y_arr = np.interp(trace_indices, picked_indices, picked_times)
         
         current_x_mode = self.view.combo_header.currentText()
         current_y_mode = self.view.combo_domain.currentText()
@@ -2175,9 +2432,23 @@ class MainController(QObject):
             
         df = pd.DataFrame()
         df["Trace Index"] = trace_indices
-        df[current_y_mode] = y_arr
         if current_x_mode != "Trace Index":
             df[current_x_mode] = mapped_x
+        df[current_y_mode] = y_arr
+        
+        # Calculate Amplitude
+        data_block = self.data_manager.get_data_slice(min_idx, max_idx + 1)
+        time_axis = self.data_manager.time_axis
+        amplitudes = []
+        for i, t_idx in enumerate(trace_indices):
+            local_idx = int(t_idx) - min_idx
+            if 0 <= local_idx < data_block.shape[1]:
+                trace_arr = data_block[:, local_idx]
+                amp = float(np.interp(y_arr[i], time_axis, trace_arr))
+            else:
+                amp = 0.0
+            amplitudes.append(amp)
+        df["Amplitude"] = amplitudes
             
         # --- Safe Header Extraction ---
         trace_indices_clipped = np.clip(trace_indices, 0, self.data_manager.n_traces - 1)
@@ -2229,10 +2500,16 @@ class MainController(QObject):
                 scalar_key = p.get("scalar_key", scalar_key)
                 manual_val = float(p.get("manual_val", manual_val))
 
-            # 2. Extract Trace Indices
+            # 2. Extract and Interpolate Trace Indices
             sorted_pts = sorted(points, key=lambda k: k[0])
-            trace_indices = np.array([int(p[0]) for p in sorted_pts])
-            times = np.array([p[1] for p in sorted_pts])
+            picked_indices = np.array([int(p[0]) for p in sorted_pts])
+            picked_times = np.array([p[1] for p in sorted_pts])
+            
+            # Interpolate to create a continuous point on every trace
+            min_idx = int(np.min(picked_indices))
+            max_idx = int(np.max(picked_indices))
+            trace_indices = np.arange(min_idx, max_idx + 1)
+            times = np.interp(trace_indices, picked_indices, picked_times)
 
             # 3. Fetch Coordinate Arrays (Full Line)
             raw_x = self.data_manager.get_header_slice(x_key, 0, self.data_manager.n_traces, 1)
@@ -2251,31 +2528,72 @@ class MainController(QObject):
             mapped_x = full_x[trace_indices]
             mapped_y = full_y[trace_indices]
 
+            # 4.5 Fetch Data Block for Amplitudes & Headers
+            min_idx = int(np.min(trace_indices))
+            max_idx = int(np.max(trace_indices))
+            data_block = self.data_manager.get_data_slice(min_idx, max_idx + 1)
+            time_axis = self.data_manager.time_axis
+            
+            avail_headers = self.data_manager.available_headers
+            header_data = {}
+            for hdr in avail_headers:
+                header_data[hdr] = self.data_manager.get_header_slice(hdr, min_idx, max_idx + 1, 1)
+
             # 5. Create Vector Layer
             layer_crs = self.qgis_layer.crs().authid()
             crs_def = f"?crs={layer_crs}" if layer_crs else ""
             
-            vl = QgsVectorLayer(f"LineString{crs_def}", f"{name} (Horizon)", "memory")
+            vl = QgsVectorLayer(f"Point{crs_def}", f"{name} (Horizon)", "memory")
             pr = vl.dataProvider()
             
-            pr.addAttributes([QgsField("first_trace", QVariant.Int), 
-                              QgsField("last_trace", QVariant.Int),
-                              QgsField("avg_time", QVariant.Double)])
+            fields = [
+                QgsField("Trace", QVariant.Int),
+                QgsField("Time_Depth", QVariant.Double),
+                QgsField("Amplitude", QVariant.Double)
+            ]
+            for hdr in avail_headers:
+                fields.append(QgsField(hdr, QVariant.Double))
+            pr.addAttributes(fields)
             vl.updateFields()
 
-            # Build Geometry
-            qgs_pts = [QgsPointXY(x, y) for x, y in zip(mapped_x, mapped_y)]
-            feat = QgsFeature()
-            feat.setGeometry(QgsGeometry.fromPolylineXY(qgs_pts))
-            feat.setAttributes([int(trace_indices[0]), int(trace_indices[-1]), float(np.mean(times))])
+            # Build Features
+            features = []
+            for i in range(len(trace_indices)):
+                t_idx = trace_indices[i]
+                x = mapped_x[i]
+                y = mapped_y[i]
+                time_val = times[i]
+                
+                local_idx = t_idx - min_idx
+                if 0 <= local_idx < data_block.shape[1]:
+                    trace_arr = data_block[:, local_idx]
+                    amp = float(np.interp(time_val, time_axis, trace_arr))
+                else:
+                    amp = 0.0
+                
+                feat = QgsFeature()
+                feat.setGeometry(QgsGeometry.fromPointXY(QgsPointXY(x, y)))
+                
+                attrs = [int(t_idx), float(time_val), amp]
+                for hdr in avail_headers:
+                    if 0 <= local_idx < len(header_data[hdr]):
+                        attrs.append(float(header_data[hdr][local_idx]))
+                    else:
+                        attrs.append(0.0)
+                        
+                feat.setAttributes(attrs)
+                features.append(feat)
             
-            pr.addFeatures([feat])
+            pr.addFeatures(features)
             vl.updateExtents()
             
             # 6. Apply Style
             symbol = QgsSymbol.defaultSymbol(vl.geometryType())
             symbol.setColor(QColor(color_hex))
-            symbol.setWidth(0.8)
+            if hasattr(symbol, 'setSize'):
+                symbol.setSize(2.0)
+            elif hasattr(symbol, 'setWidth'):
+                symbol.setWidth(0.8)
             vl.setRenderer(QgsSingleSymbolRenderer(symbol))
             
             # 7. Add to Project
@@ -2288,6 +2606,93 @@ class MainController(QObject):
             import traceback
             traceback.print_exc()
             QMessageBox.critical(self.view, "Error", f"Failed to publish horizon: {e}")
+    
+    def publish_fault_to_map(self, index):
+        """Creates a QGIS LineString layer for the selected fault."""
+        if not self.data_manager or not self.qgis_layer:
+            self.view.update_status("Error: No seismic navigation layer linked.")
+            return
+
+        fault = self.fault_manager.faults[index]
+        points = fault['points']
+        if not points:
+            self.view.update_status("Error: Fault is empty.")
+            return
+
+        name = fault['name']
+        color_hex = fault['color']
+
+        try:
+            # 1. Retrieve Geometry Settings
+            x_key = "CDP_X"; y_key = "CDP_Y"; use_header = True
+            scalar_key = "Source_Group_Scalar"; manual_val = 1.0
+
+            p_json = self.qgis_layer.customProperty("seisplotpy_geometry_params")
+            if p_json:
+                p = json.loads(str(p_json))
+                x_key = p.get("x_key", x_key)
+                y_key = p.get("y_key", y_key)
+                use_header = p.get("use_header", use_header)
+                scalar_key = p.get("scalar_key", scalar_key)
+                manual_val = float(p.get("manual_val", manual_val))
+
+            # 2. Extract Trace Indices
+            # DO NOT SORT BY X. Faults must retain pick order.
+            trace_indices = np.array([int(p[0]) for p in points])
+            times = np.array([p[1] for p in points])
+
+            # 3. Fetch Coordinate Arrays (Full Line)
+            raw_x = self.data_manager.get_header_slice(x_key, 0, self.data_manager.n_traces, 1)
+            raw_y = self.data_manager.get_header_slice(y_key, 0, self.data_manager.n_traces, 1)
+            
+            if use_header:
+                scalars = self.data_manager.get_header_slice(scalar_key, 0, self.data_manager.n_traces, 1)
+                full_x = SeismicProcessing.apply_scalar(raw_x, scalars)
+                full_y = SeismicProcessing.apply_scalar(raw_y, scalars)
+            else:
+                full_x = raw_x * manual_val
+                full_y = raw_y * manual_val
+
+            # 4. Map Fault Indices to Coordinates
+            trace_indices = np.clip(trace_indices, 0, len(full_x) - 1)
+            mapped_x = full_x[trace_indices]
+            mapped_y = full_y[trace_indices]
+
+            # 5. Create Vector Layer
+            layer_crs = self.qgis_layer.crs().authid()
+            crs_def = f"?crs={layer_crs}" if layer_crs else ""
+            
+            vl = QgsVectorLayer(f"LineString{crs_def}", f"{name} (Fault)", "memory")
+            pr = vl.dataProvider()
+            
+            pr.addAttributes([QgsField("FaultName", QVariant.String),
+                              QgsField("Points", QVariant.Int)])
+            vl.updateFields()
+
+            # Build Geometry
+            qgs_pts = [QgsPointXY(x, y) for x, y in zip(mapped_x, mapped_y)]
+            feat = QgsFeature()
+            feat.setGeometry(QgsGeometry.fromPolylineXY(qgs_pts))
+            feat.setAttributes([name, len(points)])
+            
+            pr.addFeatures([feat])
+            vl.updateExtents()
+            
+            # 6. Apply Style
+            symbol = QgsSymbol.defaultSymbol(vl.geometryType())
+            symbol.setColor(QColor(color_hex))
+            symbol.setWidth(1.5)
+            vl.setRenderer(QgsSingleSymbolRenderer(symbol))
+            
+            # 7. Add to Project
+            QgsProject.instance().addMapLayer(vl)
+            
+            self.view.update_status(f"Published fault '{name}' to map.")
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(self.view, "Error", f"Failed to publish fault: {e}")
     
     def on_mouse_moved(self, pos):
         """Updates the status bar with coordinates under the mouse."""
@@ -2306,8 +2711,9 @@ class MainController(QObject):
             header = self.view.combo_header.currentText()
             x_label = "Trace" if header == "Trace Index" else header
             
-            # 5.  Lookup World Coordinates 
+            # 5.  Lookup World Coordinates & Amplitude
             world_str = ""
+            amp_str = ""
             try:
                 # Determine Trace Index from the current X-axis value
                 t_idx = -1
@@ -2317,18 +2723,44 @@ class MainController(QObject):
                     # Find closest trace index for this X value (e.g. Distance -> Trace)
                     t_idx = (np.abs(self.active_header_map - x_val)).argmin()
                 
+                # Retrieve Amplitude if data is loaded
+                if t_idx >= 0 and self.current_data is not None:
+                    start_tr = getattr(self, 'loaded_start_trace', 0)
+                    step = getattr(self, 'current_step', 1)
+                    col = int(round((t_idx - start_tr) / step))
+                    
+                    if hasattr(self, 't_vals') and len(self.t_vals) > 1:
+                        dt = self.t_vals[1] - self.t_vals[0]
+                        row = int(round((y_val - self.t_vals[0]) / dt))
+                        
+                        if 0 <= col < self.current_data.shape[1] and 0 <= row < self.current_data.shape[0]:
+                            amp = self.current_data[row, col]
+                            amp_str = f" | Amp: {amp:.1f}"
+
                 # Retrieve World Coords if valid
                 if t_idx >= 0 and self.world_coords is not None:
                     # Adjust for spatial index decimation (coord_step)
                     wc_idx = int(t_idx / self.coord_step)
                     if 0 <= wc_idx < len(self.world_coords):
                         wx, wy = self.world_coords[wc_idx]
-                        # Format coords (adjust precision as needed)
-                        world_str = f" | CRS coords: {wx:.3f}, {wy:.3f}"
+                        
+                        try:
+                            # Project to Lat/Lon
+                            if self.qgis_layer and self.qgis_layer.crs().isValid():
+                                from qgis.core import QgsCoordinateReferenceSystem, QgsCoordinateTransform, QgsProject, QgsPointXY
+                                crs_dest = QgsCoordinateReferenceSystem("EPSG:4326")
+                                transform = QgsCoordinateTransform(self.qgis_layer.crs(), crs_dest, QgsProject.instance())
+                                pt = QgsPointXY(wx, wy)
+                                geo_pt = transform.transform(pt)
+                                world_str = f" | CRS: {wx:.1f}, {wy:.1f} | Lat: {geo_pt.y():.6f}, Lon: {geo_pt.x():.6f}"
+                            else:
+                                world_str = f" | CRS coords: {wx:.3f}, {wy:.3f}"
+                        except Exception:
+                            world_str = f" | CRS coords: {wx:.3f}, {wy:.3f}"
             except Exception: pass
             
             # 6. Update the label
-            self.view.lbl_coords.setText(f"{x_label}: {x_val:.1f} | {domain}: {y_val:.1f} {unit}{world_str}")
+            self.view.lbl_coords.setText(f"{x_label}: {x_val:.1f} | {domain}: {y_val:.1f} {unit}{amp_str}{world_str}")
     
     def show_export_headers(self):
         if not self.data_manager: return
