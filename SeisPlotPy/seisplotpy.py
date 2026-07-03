@@ -137,6 +137,8 @@ class SeisPlotPy:
         new_controller = MainController(self.iface)
         self.controllers.append(new_controller)
 
+
+
     def activate_tool(self):
         """Sets our custom tool on the canvas."""
         if self.action_link.isChecked():

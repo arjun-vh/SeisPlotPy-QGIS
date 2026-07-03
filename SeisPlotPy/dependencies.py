@@ -9,6 +9,7 @@ REQUIRED_MODULES = {
     "pandas": "pandas",
     "pyqtgraph": "pyqtgraph",
     "matplotlib": "matplotlib",
+    "markdown": "markdown",
 }
 
 
