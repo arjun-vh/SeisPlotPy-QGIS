@@ -1,6 +1,6 @@
 # Navigation & Spatial Linking
 
-SeisPlotPy is designed to bridge the gap between raw geophysical arrays (traces and amplitudes) and geographic positioning. By extracting coordinate data from your SEG-Y trace headers, the plugin generates a spatial index, calculates true cumulative distances, and seamlessly links your seismic viewer to the QGIS map canvas.
+SeisPlotPy is designed to bridge the gap between raw geophysical arrays (traces and amplitudes) and geographic positioning. By extracting coordinate data from your SEG-Y trace headers, the plugin generates a spatial index, calculates true cumulative distances, and seamlessly links the seismic viewer to the QGIS map canvas.
 
 ---
 
@@ -13,7 +13,7 @@ When you first load a SEG-Y file, the X-axis defaults to the sequential **Trace 
    * **X-Coordinate Header:** Typically `CDP_X`, `SourceX`, or `GroupX`.
    * **Y-Coordinate Header:** Typically `CDP_Y`, `SourceY`, or `GroupY`.
 3. **Apply Scalar:** SEG-Y coordinates are often stored as integers multiplied by a scaling factor. 
-   * **Use Header:** Check this to automatically apply the scalar found in the file (usually `Source_Group_Scalar`).
+   * **Use Header:** Check this to automatically apply the scalar found in the file. The dropdown below it lets you select the specific scalar header key (usually `SourceGroupScalar`).
    * **Manual Value:** If your file lacks a scalar header, uncheck the box and enter the known multiplier manually (e.g., `0.1` or `1.0`).
 4. Click **OK** to proceed to CRS Selection.
 
@@ -25,18 +25,19 @@ Immediately after setting the geometry, QGIS will prompt you to select a Coordin
 
 It is critical that you select the correct CRS that matches how the data was recorded:
 * **Projected CRS (Meters/Feet):** E.g., UTM Zones. Use this if your coordinates are in standard X/Y grids.
-* **Geographic CRS (Degrees/Arc-Seconds):** E.g., WGS 84. Use this if your coordinates are in Longitude/Latitude.
+* **Geographic CRS (Degrees):** E.g., WGS 84. Use this if your coordinates are in Longitude/Latitude.
 
-> ⚠️ **Warning:** If SeisPlotPy detects that your SEG-Y coordinate units are marked as Arc-Seconds (Unit 2 in the binary header), but you select a Projected CRS, it will abort the calculation and warn you. 
+> ⚠️ **Warning:** If SeisPlotPy detects that your SEG-Y binary header indicates `CoordinateUnits = 2` (Seconds of Arc), it will automatically convert the raw coordinates to decimal degrees. If you select a Projected CRS in this scenario, the plugin will abort the operation with a mismatch warning.
+
 ---
 
 ## 3. The Map Canvas Vector Layer
 
-Once the geometry is successfully calculated, SeisPlotPy performs three actions:
+Once the geometry is successfully calculated, SeisPlotPy performs three background actions:
 
-1. **Calculates Cumulative Distance:** A highly accurate line-length array is generated (using the Haversine formula for geographic coordinates, or Euclidean math for projected coordinates). Your X-axis will automatically switch to **Cumulative Distance** (in meters or kilometers).
-2. **Builds a Spatial Tree:** A high-speed navigation index (`cKDTree`) is built in the background to map screen pixels to real-world coordinates.
-3. **Generates a QGIS Map Layer:** A new vector layer (a polyline representing your 2D seismic survey) is added to your QGIS map canvas.
+1. **Calculates Cumulative Distance:** A highly accurate line-length array is generated. It uses the Haversine formula (if your CRS is geographic) or standard Euclidean math (if projected). Your X-axis will automatically switch to **Cumulative Distance**. If the total length exceeds 10,000 meters, it will auto-scale the axis labels to **km**.
+2. **Builds a Spatial Tree:** A high-speed navigation index (`cKDTree`) is built on a decimated coordinate array to map screen pixels to real-world coordinates instantly.
+3. **Generates a QGIS Map Layer:** A new temporary vector polyline representing your 2D seismic survey is added to your QGIS map canvas.
 
 ---
 
@@ -44,9 +45,12 @@ Once the geometry is successfully calculated, SeisPlotPy performs three actions:
 
 With the spatial link established, you can interact continuously between the QGIS main window and the SeisPlotPy viewer.
 
+### Activating the Link/Nav Tool
+> ⚠️ **Important:** Before map-linked navigation works, you must activate the **Link/Nav Tool**. Click the crosshair/cursor icon in the QGIS toolbar (it becomes highlighted when active). Without this, hovering over the map will not update the SeisPlotPy viewer.
+
 ### The QGIS Map Tool
-When SeisPlotPy is running, an active map tool is engaged on your QGIS canvas (indicated by a crosshair cursor).
-* **Hover:** As you move your mouse along the seismic line on the QGIS map, SeisPlotPy calculates the nearest trace. Look at the status bar at the bottom of the SeisPlotPy window—it will dynamically update to show the exact Map Coordinates and corresponding Seismic Trace under your mouse.
+When the Link/Nav Tool is active on your QGIS canvas:
+* **Hover:** As you move your mouse along the seismic line on the map, SeisPlotPy calculates the nearest trace. **Dynamic Tolerance** is used to ensure accuracy: a 10-pixel screen offset is transformed into your layer's specific CRS to calculate snap distance. Look at the status bar at the bottom of the SeisPlotPy window—it will dynamically update to show exactly what trace you are hovering over on the map.
 * **Double-Click:** If your SeisPlotPy window is closed, double-clicking anywhere near the seismic line on the QGIS map will instantly open the viewer again to the front of your screen.
 
 ### The Extent Highlighter (Red Line)
