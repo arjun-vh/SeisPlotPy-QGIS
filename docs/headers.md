@@ -1,54 +1,68 @@
-# Header Exploration & Utilities
+# Header Utilities
 
-SEG-Y files rely entirely on embedded metadata (headers) to establish coordinate geometry, sampling rates, and trace numbering. Incorrect or missing headers are the most common cause of spatial and processing errors. 
-
-SeisPlotPy provides a comprehensive suite of tools to inspect, visualize, and fix these headers directly within the plugin. All tools are located under **Tools > Header Utilities**.
+The SEG-Y format relies heavily on binary and trace headers to store critical metadata such as coordinate geometry, scaling factors, shot records, and sample rates. SeisPlotPy provides comprehensive tools to inspect, visualize, modify, and export this header data.
 
 ---
 
-## 1. Visualizing & QC'ing Headers
+## 1. Header Explorer
 
-Before attempting to fix or map your data, it is crucial to understand what metadata is actually stored in your file.
+To inspect the raw header values encoded in your file, navigate to **Tools > Header Utilities > Header Explorer (Binary/Trace)**.
 
-### View Text Header (EBCDIC / ASCII)
-The textual file header (usually 3200 bytes) contains the human-readable survey history, acquisition parameters, and processing notes.
-1. Navigate to **Tools > Header Utilities > View Text Header**.
-2. A window will display the parsed text. 
-3. **Editing:** If you notice a typo or want to append your own processing notes, you can type directly into this window. Click **Save As New File...** to export a copy of the SEG-Y with your updated text header.
+The Explorer window contains two tabs:
 
-### Header Explorer
-If you need to inspect the raw binary or trace headers in a structured format:
-1. Navigate to **Tools > Header Utilities > Header Explorer (Binary/Trace)**.
-2. This opens a tabular spreadsheet view of your file's metadata, allowing you to quickly scroll through trace indices and see the exact integer or float values stored in every byte location.
+### Trace Headers Tab
+This is a spreadsheet-like view of every trace in the file. 
+* **Rows:** Represent individual seismic traces.
+* **Columns:** Represent the individual trace header fields (e.g., `CDP_X`, `Elevation`, `SourceGroupScalar`).
+* Because a file may contain 100,000+ traces, the Explorer pages the data. Use the scrollbar to fetch the next block of traces efficiently.
 
-### Trace Header QC Plot
-Ggraphing the headers makes it  obvious if you have bad coordinates, dropped traces, or static shift errors.
+### Binary File Header Tab
+The SEG-Y 400-byte binary header contains global survey parameters. This tab displays a decoded, human-readable list of over 30 critical fields, including:
+`Job_ID`, `LineNumber`, `DataTracePerRecord`, `SampleInterval`, `DataSampleFormatCode`, `MeasurementSystem`, and `SEGYRevisionNumber`.
+
+> **Fallback Mode Limitation:** If your file was opened using the raw fallback reader, the Binary File Header tab will be unavailable. Furthermore, the Trace Headers tab will only display a hardcoded subset of ~30 core header fields, rather than the full 90+ field standard.
+
+---
+
+## 2. Trace Header QC Plot
+
+Graphing the headers makes it immediately obvious if you have bad coordinates, missing scalars, or corrupted trace headers.
+
 1. Navigate to **Tools > Header Utilities > Trace Header QC Plot**.
-2. Select a header (e.g., `CDP_X` or `Elevation`) from the dropdown.
-3. SeisPlotPy will plot the header values on the Y-axis against the Trace Index on the X-axis. Look for sudden spikes, gaps, or zeros that indicate corrupted metadata.
+2. Select a header field from the dropdown.
+3. SeisPlotPy instantly extracts that byte location from every trace and graphs the value sequentially (Trace Index vs Header Value).
+4. You can use the standard Matplotlib controls to zoom, pan, and save the QC graph.
 
 ---
 
-## 2. Exporting Headers to CSV
+## 3. View Text Header
 
-If you need to analyze your geometry in external software (like Python, Excel, or standalone QGIS), you can extract the trace headers to a standard CSV file.
+The SEG-Y EBCDIC (or ASCII) text header contains 3200 bytes of free-form text, usually containing the observer's log, processing history, and CRS definitions.
 
-1. Navigate to **Tools > Header Utilities > Export Headers to CSV...**.
-2. A dialog will appear listing all available headers in your SEG-Y file.
-3. Check the boxes next to the headers you want to extract (e.g., `TraceNumber`, `CDP_X`, `CDP_Y`).
-4. Click OK and choose a save location. The resulting CSV will contain one row per trace.
+### Editing the Text Header
+SeisPlotPy allows you to view and directly edit this text header inside a modeless dialog (which means you can leave it open while interacting with the main window).
+
+1. Navigate to **Tools > Header Utilities > View Text Header**.
+2. You can type directly into the text box to update the observer log or correct a typo.
+3. Click **Save As New File...** to write your changes. 
+4. The plugin will automatically sanitize your text (enforcing the strict 40 lines × 75 characters format, replacing tabs with spaces, and stripping old `C xx` prefixes) before automatically opening the [SEG-Y Subset Export](exporting.md) dialog. Your modified text header will be embedded into the newly exported file.
 
 ---
 
-## 3. Patching Headers (Advanced)
+## 4. Bulk Header Modification
 
-If your SEG-Y file is missing spatial coordinates, or the coordinates were written in the wrong byte locations, SeisPlotPy allows you to "patch" the file using an external CSV. 
+If you need to fix coordinates or apply a static shift across an entire 2D line, you can export the headers, manipulate them in Excel or Python, and patch them back into a new SEG-Y file.
 
-*Common Use Case:* You have a raw SEG-Y file and a separate CSV navigation file containing the shotpoint coordinates.
+### Step 1: Export Headers to CSV
+1. Navigate to **Tools > Header Utilities > Export Headers to CSV...**
+2. Select the specific header fields you want to extract.
+3. Click Export. SeisPlotPy generates a CSV with one row per trace.
 
-1. Navigate to **Tools > Header Utilities > Patch Headers from CSV...**.
-2. **Select Inputs:** Provide the path to your source CSV and the path for the new target SEG-Y file.
-3. **Configure the Mapping:** You must map the columns in your CSV to the specific SEG-Y byte locations (e.g., mapping your CSV's `Easting` column trace header `SourceX`).
-4. **Execute:** Click OK to start the patching process.
+### Step 2: Edit the CSV
+Open the CSV in your preferred spreadsheet software. You can perform bulk calculations (e.g., converting feet to meters, adding a constant static shift, or interpolating missing X/Y coordinates). Save the file, ensuring you don't change the column names.
 
-> 🛡️ **Safety Mechanism (Non-Destructive Patching):** > To protect your original data, SeisPlotPy **never** overwrites your source SEG-Y file. The patching engine streams the trace data from your original file, swaps the specified header bytes, automatically standardizes the Endianness (to Big-Endian `>`), and writes an entirely new, structurally sound SEG-Y file to your hard drive.
+### Step 3: Patch Headers from CSV
+1. Navigate to **Tools > Header Utilities > Patch Headers from CSV...**
+2. Select your modified CSV file.
+3. SeisPlotPy will read the CSV, map the column names back to standard SEG-Y byte locations, and generate a **new SEG-Y file**. 
+4. *Note: SeisPlotPy never overwrites your original data. A new file is always created during a patching operation.*
